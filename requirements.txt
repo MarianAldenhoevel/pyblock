@@ -1,0 +1,19 @@
+# pyBlock dependencies
+# Install with:  pip install -r requirements.txt
+
+# Core image processing
+Pillow>=10.0.0
+
+# (No other Python-only runtime dependencies)
+#
+# External program dependencies (not pip-installable — install via OS package manager):
+#
+#   potrace  >= 1.16   https://potrace.sourceforge.net/
+#     Ubuntu/Debian : sudo apt install potrace
+#     macOS (brew)  : brew install potrace
+#     Windows       : download from the project website
+#
+#   vtracer  (optional alternative vectorizer)
+#     pip install vtracer     (where a wheel is available for your platform)
+#
+# Python version: 3.11+  (uses X | Y union type hints in function signatures)
