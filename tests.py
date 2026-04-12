@@ -16,12 +16,17 @@ def remove_artifacts():
     for file in TESTDATA_DIR.glob("*.stl"):
         file.unlink()
 
-def run_test(input_file, vectorizer):
-    output_file = input_file.with_suffix(f".{vectorizer}.stl")
+def run_test(input_file, vectorizer, height):
+    if vectorizer:
+        ext = vectorizer + "."
+    else:
+        ext = ""
+
+    output_file = input_file.with_suffix(f".{"relief" if height>0 else "emboss"}.{ext}stl")
 
     try:
-        cmd = [sys.executable, str(TEST_SCRIPT), "--input", str(input_file), "--output", str(output_file)] + (["--vectorizer", vectorizer] if vectorizer != "" else [])
-        #print(cmd)
+        cmd = [sys.executable, str(TEST_SCRIPT), "--input", str(input_file), "--output", str(output_file), "--relief-height", str(height)] + (["--vectorizer", vectorizer] if vectorizer != "" else [])
+        # print(cmd)
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
@@ -57,18 +62,19 @@ def main():
 
     for file in test_files:
         
-        for vectorizer in [""] if file.suffix.lower() == '.svg' else ["potrace", "vtracer", "none"]:        
-            total += 1
-            ok, reason = run_test(file, vectorizer)
+        for height in [-1.0, 1.0]:
+            for vectorizer in [""] if file.suffix.lower() == '.svg' else ["potrace", "vtracer", "none"]:        
+                total += 1
+                ok, reason = run_test(file, vectorizer, height)
 
-            msg = str(file) + (f" (vectorizer: {vectorizer})" if vectorizer else "")
+                msg = str(file) + f" {height:+}mm " + (f" (vectorizer: {vectorizer})" if vectorizer else "")
 
-            if ok:
-                passed += 1
-                print(f"{GREEN}[PASS]{RESET} {msg}")
-            else:
-                failed += 1
-                print(f"{RED}[FAIL]{RESET} {msg}: {reason}")
+                if ok:
+                    passed += 1
+                    print(f"{GREEN}[PASS]{RESET} {msg}")
+                else:
+                    failed += 1
+                    print(f"{RED}[FAIL]{RESET} {msg}: {reason}")
 
 
     print(f"")    

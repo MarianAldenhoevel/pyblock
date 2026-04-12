@@ -84,22 +84,35 @@ class STLBuilder:
         """
         triangles: list[Triangle] = []
 
-        # ── Base plate ────────────────────────────────────────────────────────
+        # ── Base plate sides + bottom ─────────────────────────────────────────
         log.info("  Building base plate…")
-        triangles.extend(self._base_plate())
-        log.debug("    Base plate: %d triangles so far.", len(triangles))
+        triangles.extend(self._base_plate_sides())
 
         # ── Relief geometry ───────────────────────────────────────────────────
+        # Collect (outer_mm, holes_mm) for the plate top face.
+        # The plate top face must have:
+        #   - shape outer contours as HOLES (they open the plate surface)
+        #   - shape hole contours as filled ISLANDS (they re-close the surface
+        #     inside the outer hole, because hole-walls also need a z=plate_top floor)
+        plate_shapes_mm: list[tuple[list[Point2], list[list[Point2]]]] = []
+
         if shapes and self.rh != 0.0:
             log.info("  Extruding %d shape(s) into relief layer…", len(shapes))
             for idx, (outer, holes) in enumerate(shapes):
                 if len(outer) < 3:
                     continue
+                outer_mm = [(x * self.pw, y * self.ph) for x, y in outer]
+                holes_mm = [[(x * self.pw, y * self.ph) for x, y in h] for h in holes]
+                plate_shapes_mm.append((outer_mm, holes_mm))
                 tris = self._extrude_shape(outer, holes)
                 triangles.extend(tris)
                 if (idx + 1) % 100 == 0:
                     log.debug("    … %d / %d shapes processed.", idx+1, len(shapes))
             log.debug("    After relief: %d triangles.", len(triangles))
+
+        # ── Plate top face ────────────────────────────────────────────────────
+        triangles.extend(self._plate_top_face(plate_shapes_mm))
+        log.debug("    After plate top: %d triangles.", len(triangles))
 
         # ── Write STL ─────────────────────────────────────────────────────────
         log.info("  Writing STL to '%s' (%s)…", out_path,
@@ -113,45 +126,59 @@ class STLBuilder:
 
     # ── Base plate ────────────────────────────────────────────────────────────
 
-    def _base_plate(self) -> list[Triangle]:
-        """Return triangles for the solid rectangular base plate."""
-        w, h, z0, zt = self.pw, self.ph, 0.0, self.z_plate_top
+    def _base_plate_sides(self) -> list[Triangle]:
+        """Bottom face + four side walls of the base plate (no top face)."""
+        w, h, top_z = self.pw, self.ph, self.z_plate_top
         tris: list[Triangle] = []
-
-        if self.rh >= 0:
-            # Standard case: plate top is the background, relief sits above
-            top_z = zt
-        else:
-            # Emboss case: plate top sits at zt, relief pockets go below
-            top_z = zt
-
         # Bottom face (z = 0), normal pointing down
-        tris += _quad(
-            (0, 0, 0), (w, 0, 0), (w, h, 0), (0, h, 0),
-            flip=True,
-        )
-        # Top face (z = top_z), normal pointing up
-        tris += _quad(
-            (0, 0, top_z), (w, 0, top_z), (w, h, top_z), (0, h, top_z),
-        )
-        # Front face (y = 0)
-        tris += _quad(
-            (0, 0, 0), (w, 0, 0), (w, 0, top_z), (0, 0, top_z),
-            flip=True,
-        )
-        # Back face (y = h)
-        tris += _quad(
-            (0, h, 0), (w, h, 0), (w, h, top_z), (0, h, top_z),
-        )
-        # Left face (x = 0)
-        tris += _quad(
-            (0, 0, 0), (0, h, 0), (0, h, top_z), (0, 0, top_z),
-        )
-        # Right face (x = w)
-        tris += _quad(
-            (w, 0, 0), (w, h, 0), (w, h, top_z), (w, 0, top_z),
-            flip=True,
-        )
+        tris += _quad((0,0,0), (w,0,0), (w,h,0), (0,h,0), flip=True)
+        # Front (y=0), Back (y=h), Left (x=0), Right (x=w)
+        tris += _quad((0,0,0), (w,0,0), (w,0,top_z), (0,0,top_z), flip=True)
+        tris += _quad((0,h,0), (w,h,0), (w,h,top_z), (0,h,top_z))
+        tris += _quad((0,0,0), (0,h,0), (0,h,top_z), (0,0,top_z))
+        tris += _quad((w,0,0), (w,h,0), (w,h,top_z), (w,0,top_z), flip=True)
+        return tris
+
+    def _plate_top_face(
+        self,
+        plate_shapes_mm: list[tuple[list[Point2], list[list[Point2]]]],
+    ) -> list[Triangle]:
+        """
+        Top face of the plate at z = z_plate_top.
+
+        The plate top is the visible surface of the base plate.  Wherever a
+        shape sits on the plate that surface is interrupted:
+
+          • Each shape outer contour becomes a HOLE in the plate rectangle.
+            The matching surface inside that hole is provided by the shape
+            extrusion (raised: the extrusion bottom; embossed: the extrusion top).
+
+          • Each shape hole contour (e.g. the counter of a letter 'e') becomes a
+            FILLED ISLAND at z_plate_top.  The hole side-walls reach down to
+            z_plate_top and need a floor here to close the solid.
+
+        plate_shapes_mm — list of (outer_mm, holes_mm) already in mm.
+        """
+        w, h, zt = self.pw, self.ph, self.z_plate_top
+        tris: list[Triangle] = []
+        z = zt  # shorthand
+
+        # ── Main plate rectangle with shape-outer holes ───────────────────────
+        plate_rect: list[Point2] = [(0,0), (w,0), (w,h), (0,h), (0,0)]
+        outer_footprints = [outer for outer, _ in plate_shapes_mm]
+        for a, b, c in _earcut_with_holes(plate_rect, outer_footprints):
+            tris.append((_p3(a, z), _p3(b, z), _p3(c, z)))
+
+        # ── Filled islands for each shape's hole contours ─────────────────────
+        # Each hole contour of a shape (e.g. enclosed counter of 'o', 'e', 'B')
+        # is a region where the plate top surface is visible again — the hole
+        # side-walls bound this island and need a closed floor.
+        for _, holes_mm in plate_shapes_mm:
+            for hole_pts in holes_mm:
+                # Triangulate as a plain filled polygon (no sub-holes)
+                for a, b, c in _earcut_with_holes(hole_pts, []):
+                    tris.append((_p3(a, z), _p3(b, z), _p3(c, z)))
+
         return tris
 
     # ── Shape extrusion (outer contour + holes) ──────────────────────────────
@@ -192,15 +219,21 @@ class STLBuilder:
             flip_cap = False
 
         # ── Caps (top and bottom) with holes ─────────────────────────────────
+        # The cap that lies exactly at z_plate_top is NOT emitted here because
+        # the plate top face (rect-minus-footprint) already closes that surface.
+        # Emitting it again would create a duplicate surface with conflicting edges.
+        #
+        # Non-embossed (flip_cap=False): z_bot = z_plate_top  -> skip bottom cap
+        # Embossed     (flip_cap=True):  z_top = z_plate_top  -> skip top cap
+        #   (after the swap, z_top holds the plate surface level)
         cap_tris = _earcut_with_holes(outer_mm, holes_mm)
         for a, b, c in cap_tris:
             if flip_cap:
-                # top cap (normals up) and bottom cap (normals down) are swapped
-                tris.append((_p3(a, z_top), _p3(c, z_top), _p3(b, z_top)))
+                # Embossed: emit only the pocket bottom cap (nz=-1 at z_bot)
                 tris.append((_p3(a, z_bot), _p3(b, z_bot), _p3(c, z_bot)))
             else:
+                # Raised: emit only the relief top cap (nz=+1 at z_top)
                 tris.append((_p3(a, z_top), _p3(b, z_top), _p3(c, z_top)))
-                tris.append((_p3(a, z_bot), _p3(c, z_bot), _p3(b, z_bot)))
 
         # ── Side walls for outer contour ──────────────────────────────────────
         _add_walls(tris, outer_mm, z_bot, z_top, flip=False)

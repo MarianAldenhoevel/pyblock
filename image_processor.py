@@ -192,9 +192,6 @@ class ImageProcessor:
             except subprocess.TimeoutExpired:
                 raise RuntimeError("potrace timed out after 120s")
             if result.returncode != 0:
-                
-                exit
-
                 raise RuntimeError(
                     f"potrace failed (exit {result.returncode}):\n{result.stderr}"
                 )
@@ -210,51 +207,119 @@ class ImageProcessor:
 
     def _vectorise_vtracer(
         self, img_1bit: "Image.Image", w: int, h: int
-    ) -> list[list[tuple[float, float]]]:
+    ) -> list[tuple[list[tuple[float, float]], list]]:
+        """
+        Vectorise using the vtracer Python library (no subprocess or temp files).
+
+        vtracer.convert_pixels_to_svg() takes raw RGBA pixel data and returns
+        an SVG string directly in memory.  The output SVG has no group-level
+        transform (unlike potrace); instead each <path> carries its own
+        transform="translate(x,y)" which our _parse_svg_paths walker handles.
+        """
         log.info("Vectorising with vtracer…")
-        with tempfile.TemporaryDirectory() as tmp:
-            png_path = os.path.join(tmp, "input.png")
-            svg_path = os.path.join(tmp, "output.svg")
+        try:
+            import vtracer as _vtracer
+        except ImportError:
+            raise ImportError(
+                "The 'vtracer' Python package is required for --vectorizer vtracer.\n"
+                "Install it with:  pip install vtracer"
+            )
 
-            img_1bit.convert("RGB").save(png_path)
+        # vtracer needs RGBA pixel data as a tuple of (R,G,B,A) tuples.
+        # The 1-bit image is converted to RGBA: black pixels → (0,0,0,255),
+        # white pixels → (255,255,255,255).
+        img_rgba = img_1bit.convert("RGBA")
+        pixel_data = img_rgba.get_flattened_data()
 
-            cmd = [
-                "vtracer",
-                "--input", png_path,
-                "--output", svg_path,
-                "--colormode", "binary",
-                f"--color_precision={self.vtracer_color_precision}",
-                f"--filter_speckle={self.vtracer_filter_speckle}",
-            ]
-            log.debug("  Command: %s", " ".join(cmd))
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("vtracer timed out after 120 s")
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"vtracer failed (exit {result.returncode}):\n{result.stderr}"
-                )
+        svg_str = _vtracer.convert_pixels_to_svg(
+            pixel_data,
+            size=(w, h),
+            colormode="binary",
+            filter_speckle=self.vtracer_filter_speckle,
+            color_precision=self.vtracer_color_precision,
+        )
+        log.debug("  vtracer returned %d bytes of SVG", len(svg_str))
 
-            paths = _parse_svg_paths(svg_path, w, h, self.curve_segments)
+        # Parse the in-memory SVG string through a temporary file so we can
+        # reuse _parse_svg_paths (which uses ElementTree.parse on a path).
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".svg", mode="w",
+                                         encoding="utf-8", delete=False) as f:
+            f.write(svg_str)
+            tmp_path = f.name
+        try:
+            shapes = _parse_svg_paths(tmp_path, w, h, self.curve_segments)
+        finally:
+            os.unlink(tmp_path)
 
-        log.info("  vtracer produced %d path(s).", len(paths))
-        return paths
+        log.info("  vtracer produced %d shape(s).", len(shapes))
+        return shapes
 
-    # ── pixel-grid fallback ───────────────────────────────────────────────────
+    # ── pixel-grid / contour fallback ────────────────────────────────────────
 
     def _vectorise_pixels(
         self, img_1bit: "Image.Image", w: int, h: int
     ) -> list[tuple[list[tuple[float, float]], list]]:
         """
-        Very simple pixel-block approach: each black pixel becomes a unit square
-        polygon.  Neighbouring squares are merged into rectangular runs per row.
-        Raster rectangles never have holes, so each is wrapped as (outer, []).
+        Vectorise the 1-bit image by tracing pixel-exact outlines.
+
+        Uses skimage.measure.find_contours (Marching Squares) when available,
+        which produces proper closed polygons with hole detection — letter
+        counters ('o', 'e', 'B' etc.) become holes, giving manifold STL output.
+
+        Falls back to a simple horizontal pixel-run approach if skimage is not
+        installed.  The fallback produces valid geometry but adjacent runs share
+        walls, which some slicers will repair automatically.
         """
-        log.info("  Building pixel-rect geometry (%d×%d)…", w, h)
+        try:
+            import numpy as np
+            from skimage import measure as _skm
+            return self._vectorise_pixels_contour(img_1bit, w, h, np, _skm)
+        except ImportError:
+            log.warning(
+                "scikit-image not installed — using pixel-run fallback.\n"
+                "  Install it for better results:  pip install scikit-image"
+            )
+            return self._vectorise_pixels_runs(img_1bit, w, h)
+
+    def _vectorise_pixels_contour(
+        self, img_1bit: "Image.Image", w: int, h: int, np, skm
+    ) -> list[tuple[list[tuple[float, float]], list]]:
+        """Marching-squares contour tracing via scikit-image."""
+        log.info("  Tracing pixel contours (%d×%d) via scikit-image…", w, h)
+
+        # Build binary array: 1 = foreground (black), 0 = background
+        arr = np.array(img_1bit.convert("L"))
+        binary = (arr < 128).astype(np.uint8)
+
+        # Pad with zeros so contours at the image border close properly
+        padded = np.pad(binary, 1, constant_values=0)
+
+        # find_contours returns sub-pixel contours in (row, col) order
+        contours_rc = skm.find_contours(padded, 0.5)
+        # Undo the 1-pixel padding offset
+        contours_rc = [c - 1 for c in contours_rc]
+
+        # Convert (row, col) → normalised (x, y) = (col/w, row/h)
+        def to_xy(c_rc):
+            return [(float(col) / w, float(row) / h) for row, col in c_rc]
+
+        # Build flat list of (normalised_pts, signed_area) for grouping
+        sub_paths = [to_xy(c) for c in contours_rc]
+
+        log.info("  Contour tracing produced %d contour(s).", len(sub_paths))
+
+        # _group_sub_paths classifies by winding: positive area = outer, negative = hole
+        # Pass svg_w=1, svg_h=1 because pts are already normalised
+        return _group_sub_paths(sub_paths, 1.0, 1.0)
+
+    def _vectorise_pixels_runs(
+        self, img_1bit: "Image.Image", w: int, h: int
+    ) -> list[tuple[list[tuple[float, float]], list]]:
+        """Fallback: merge horizontal pixel runs into rectangle shapes."""
+        log.info("  Building pixel-run geometry (%d×%d)…", w, h)
         pixels = img_1bit.load()
         shapes = []
-
         for y in range(h):
             x_start: int | None = None
             for x in range(w):
@@ -266,8 +331,7 @@ class ImageProcessor:
                     x_start = None
             if x_start is not None:
                 shapes.append((_rect_path(x_start, y, w, y + 1, w, h), []))
-
-        log.info("  Pixel-grid extraction produced %d rectangle(s).", len(shapes))
+        log.info("  Pixel-run fallback produced %d rectangle(s).", len(shapes))
         return shapes
 
 
@@ -284,30 +348,54 @@ def _signed_area_2d(pts: list[tuple[float, float]]) -> float:
     return area / 2.0
 
 
+def _point_in_polygon(pt: tuple[float, float],
+                       poly: list[tuple[float, float]]) -> bool:
+    """Ray-casting point-in-polygon test (2-D, unnested)."""
+    x, y = pt
+    n = len(poly)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
 def _group_sub_paths(
     sub_paths: list[list[tuple[float, float]]],
     svg_w: float, svg_h: float,
 ) -> list[tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]]:
     """
-    Group a list of sub-paths (from a single SVG <path> element) into
-    (outer, [holes]) Shape tuples using winding-order classification.
+    Group a list of sub-paths into (outer, [holes]) Shape tuples.
 
-    SVG uses the even-odd / nonzero fill rule: sub-paths with opposite
-    winding to the first (largest) contour are holes.  We determine
-    outer vs hole by signed area: the largest-area contour is the outer
-    shell; remaining contours whose winding opposes the outer are holes.
-    Those that have the same winding as the outer are independent filled
-    shapes.
+    Works for both SVG compound paths and independently traced contours
+    (e.g. from scikit-image Marching Squares), regardless of which winding
+    sign the caller uses for outers vs holes.
 
-    All coordinates are normalised to [0,1]×[0,1] before returning.
+    Algorithm
+    ---------
+    1. Normalise to [0,1]x[0,1] and compute signed areas.
+    2. Sort by absolute area descending.  The largest contour is always an
+       outer shell; smaller contours are classified relative to it.
+    3. For each contour, walk the sorted list to find the smallest enclosing
+       parent via point-in-polygon.  A contour whose parent has OPPOSITE
+       winding is a hole of that parent; same winding means it is a nested
+       independent outer (e.g. a filled island inside a donut).
+    4. Contours with no enclosing parent are top-level outers.
+
+    This is winding-sign agnostic: it handles SVG paths (where the outer may
+    be CW or CCW depending on the drawing tool) and scikit-image contours
+    (where the outer is always CW in screen/y-down coordinates).
     """
     if not sub_paths:
         return []
 
     # Normalise and compute signed areas
-    normed = []
+    normed: list[tuple[list[tuple[float, float]], float]] = []
     for sp in sub_paths:
-        # drop closing duplicate for area calculation
         pts = sp[:-1] if (len(sp) > 1 and sp[0] == sp[-1]) else sp
         if len(pts) < 3:
             continue
@@ -318,31 +406,69 @@ def _group_sub_paths(
     if not normed:
         return []
 
-    # Sort by absolute area descending — largest contour first
+    # Sort by absolute area descending so we process large contours first
     normed.sort(key=lambda t: abs(t[1]), reverse=True)
 
-    shapes: list[tuple[list, list]] = []
-    used = [False] * len(normed)
+    n = len(normed)
+    # parent[i] = index of the smallest enclosing contour, or -1 for top-level
+    parent: list[int] = [-1] * n
 
-    for i, (outer_pts, outer_area) in enumerate(normed):
-        if used[i]:
-            continue
-        used[i] = True
-        holes = []
-        # Any subsequent contour that has opposite winding AND is geometrically
-        # inside the outer is a hole.  We use winding sign as the primary test
-        # (matching SVG nonzero fill rule behaviour for well-formed paths).
-        for j in range(i + 1, len(normed)):
-            if used[j]:
-                continue
-            inner_pts, inner_area = normed[j]
-            # Opposite winding → hole
-            if (outer_area > 0) != (inner_area > 0):
-                holes.append(inner_pts)
-                used[j] = True
-        shapes.append((outer_pts, holes))
+    for i in range(n):
+        pts_i, _ = normed[i]
+        test_pt = pts_i[0]
+        # Find the smallest (latest in sorted order) contour that contains i
+        for j in range(i - 1, -1, -1):
+            pts_j, _ = normed[j]
+            if _point_in_polygon(test_pt, pts_j):
+                parent[i] = j
+                break
 
-    return shapes
+    # Classify: a contour is a hole of its parent if their winding signs differ
+    # Contours with no parent, or same winding as parent, are independent outers
+    # We collect (outer_idx -> [hole_pts]) and handle nesting levels
+    outer_holes: dict[int, list] = {}
+    is_hole: list[bool] = [False] * n
+
+    for i in range(n):
+        p = parent[i]
+        if p == -1:
+            outer_holes.setdefault(i, [])
+        else:
+            _, area_i = normed[i]
+            _, area_p = normed[p]
+            if (area_i > 0) != (area_p > 0):
+                # Opposite winding: i is a hole of p
+                is_hole[i] = True
+                outer_holes.setdefault(p, []).append(normed[i][0])
+            else:
+                # Same winding: i is an independent inner outer
+                outer_holes.setdefault(i, [])
+
+    # Ensure every outer has an entry
+    for i in range(n):
+        if not is_hole[i]:
+            outer_holes.setdefault(i, [])
+
+    # Build result list; each outer may have holes assigned to it
+    # Normalise winding: ensure outers have consistent sign by checking against
+    # the largest contour (index 0) and reversing if needed
+    if normed:
+        canonical_sign = 1 if normed[0][1] > 0 else -1
+    else:
+        canonical_sign = 1
+
+    result = []
+    for i in sorted(outer_holes.keys()):
+        if is_hole[i]:
+            continue  # already assigned as a hole
+        pts, area = normed[i]
+        # Ensure outer winding is consistent (all outers same sign)
+        if (area > 0) != (canonical_sign > 0):
+            pts = pts[::-1]
+        holes = outer_holes.get(i, [])
+        result.append((pts, holes))
+
+    return result
 
 
 def _parse_svg_paths(
