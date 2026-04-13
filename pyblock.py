@@ -8,17 +8,18 @@ printing on paper or fabric.
 """
 
 import argparse
+from asyncio import subprocess
 import logging
 import sys
 import os
 import time
+import shutil
 
 from image_processor import ImageProcessor
 from svg_parser import SVGParser
 from stl_builder import STLBuilder
-from utils import check_dependencies, setup_logging, print_banner
 
-__version__ = "1.0.0"
+__version__ = "0.0.1"
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -30,14 +31,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  pyblock --input photo.jpg --output stamp.stl
-  pyblock -i drawing.svg -o block.stl --width 100 --relief-height 2.0
-  pyblock --input logo.png --threshold 128 --min-line-width 1.5 --invert
-  pyblock --input photo.jpg --vectorizer potrace --potrace-threshold 0.45
+  pyblock -input photo.jpg -output stamp.stl
+  pyblock -i drawing.svg -o block.stl -width 100 -relief-height 2.0
+  pyblock -input logo.png -threshold 128 -min-line-width 1.5 -invert
+  pyblock -input photo.jpg -vectorizer potrace -potrace-threshold 0.45
 """,
     )
 
-    # ── Input / Output ────────────────────────────────────────────────────────
+    # Input / Output ----
     io_group = parser.add_argument_group("Input / Output")
     io_group.add_argument(
         "--input", "-i",
@@ -52,7 +53,7 @@ Examples:
         help="Output STL file path. Defaults to <input_basename>.stl.",
     )
 
-    # ── Plate geometry ────────────────────────────────────────────────────────
+    # Plate geometry ----
     geom_group = parser.add_argument_group("Plate Geometry")
     geom_group.add_argument(
         "--width", "-w",
@@ -86,7 +87,7 @@ Examples:
         help="Minimum width for lines and thin features in mm (default: 1.0).",
     )
 
-    # ── Raster / quantization ─────────────────────────────────────────────────
+    # Raster / quantization -
     raster_group = parser.add_argument_group("Raster Image Processing")
     raster_group.add_argument(
         "--threshold", "-t",
@@ -104,14 +105,14 @@ Examples:
         help="Invert the 1-bit image before processing (swap black and white).",
     )
 
-    # ── Vectorization ─────────────────────────────────────────────────────────
+    # Vectorization -----
     vec_group = parser.add_argument_group("Vectorization (raster inputs only)")
     vec_group.add_argument(
         "--vectorizer",
-        choices=["potrace", "vtracer", "none"],
+        choices=["potrace", "vtracer"],
         default="potrace",
         help=(
-            "Vectorization engine to use (default: potrace). "
+            "Vectorization engine to use (default: vtracer). "
             "'none' skips vectorization and works directly from the pixel grid."
         ),
     )
@@ -120,51 +121,51 @@ Examples:
         type=float,
         default=0.5,
         metavar="0.0-1.0",
-        help="Potrace blackness threshold (0.0-1.0, default: 0.5).",
+        help="Potrace: Blackness threshold (0.0-1.0, default: 0.5).",
     )
     vec_group.add_argument(
         "--potrace-turdsize",
         type=int,
         default=2,
         metavar="N",
-        help="Potrace: suppress speckles of up to N pixels (default: 2).",
+        help="Potrace: Suppress speckles of up to N pixels (default: 2).",
     )
     vec_group.add_argument(
         "--potrace-alphamax",
         type=float,
         default=1.0,
         metavar="0.0-1.333",
-        help="Potrace: corner threshold parameter (default: 1.0).",
+        help="Potrace: Corner threshold parameter (default: 1.0).",
     )
     vec_group.add_argument(
         "--potrace-opttolerance",
         type=float,
         default=0.2,
         metavar="FLOAT",
-        help="Potrace: curve optimization tolerance (default: 0.2).",
+        help="Potrace: Curve optimization tolerance (default: 0.2).",
     )
     vec_group.add_argument(
         "--vtracer-color-precision",
         type=int,
         default=6,
         metavar="N",
-        help="vtracer: number of significant bits for color quantization (default: 6).",
+        help="Vtracer: Number of significant bits for color quantization (default: 6).",
     )
     vec_group.add_argument(
         "--vtracer-filter-speckle",
         type=int,
         default=4,
         metavar="PX",
-        help="vtracer: discard patches smaller than N pixels (default: 4).",
+        help="Vtracer: Discard patches smaller than N pixels (default: 4).",
     )
 
-    # ── STL output ────────────────────────────────────────────────────────────
+    # STL output --------
     stl_group = parser.add_argument_group("STL Output")
     stl_group.add_argument(
         "--stl-binary",
         action="store_true",
         default=True,
-        help="Write binary STL (default: True, more compact).",
+        help="Write binary STL (default).",
     )
     stl_group.add_argument(
         "--stl-ascii",
@@ -180,7 +181,7 @@ Examples:
         help="Number of line segments used to approximate each curve (default: 16).",
     )
 
-    # ── Logging / misc ────────────────────────────────────────────────────────
+    # Logging / misc ----
     misc_group = parser.add_argument_group("Miscellaneous")
     misc_group.add_argument(
         "--verbose", "-v",
@@ -200,14 +201,45 @@ Examples:
 
     return parser
 
+def setup_logging(level: int = logging.INFO) -> None:
+    GREY   = "\033[90m"
+    CYAN   = "\033[96m"
+    YELLOW = "\033[93m"
+    RED    = "\033[91m"
+    BOLD   = "\033[1m"
+    RESET  = "\033[0m"
 
-def resolve_output_path(input_path: str, output_arg: str | None) -> str:
-    if output_arg:
-        return output_arg
-    directory = os.path.dirname(input_path)
-    base = os.path.splitext(os.path.basename(input_path))[0]
-    return os.path.join(directory, f"{base}.stl")
+    level_colours = {
+        logging.DEBUG:    GREY,
+        logging.INFO:     CYAN,
+        logging.WARNING:  YELLOW,
+        logging.ERROR:    RED,
+        logging.CRITICAL: BOLD + RED,
+    }
 
+    level_names = {
+        logging.DEBUG:    "DEBUG",
+        logging.INFO:     "INFO",
+        logging.WARNING:  "WARN",
+        logging.ERROR:    "ERROR",
+        logging.CRITICAL: "FATAL",
+    }
+
+    class ColouredFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            colour = level_colours.get(record.levelno, RESET)
+            level_name = level_names.get(record.levelno, record.levelname)
+            level_tag = f"{colour}[{level_name:<5}]{RESET}"
+            name_tag  = f"{GREY}{record.name}{RESET}"
+            return f"{level_tag} {name_tag}: {record.getMessage()}"
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(ColouredFormatter())
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers.clear()
+    root.addHandler(handler)
 
 def main() -> int:
     parser = build_arg_parser()
@@ -225,54 +257,78 @@ def main() -> int:
     log = logging.getLogger("pyblock")
 
     if not args.quiet:
-        print_banner(__version__)
-
-    # ── Validate arguments ────────────────────────────────────────────────────
+        print(f"pyBlock v{__version__} - Image-to-STL block print converter\n")
+        
+    # Validate arguments
     if not os.path.isfile(args.input):
-        log.error("Input file not found: %s", args.input)
+        log.error(f"Input file not found: {args.input}")
         return 1
 
     if args.threshold < 0 or args.threshold > 255:
-        log.error("--threshold must be in range 0-255 (got %d)", args.threshold)
+        log.error(f"--threshold must be in range 0-255 (got {args.threshold})")
         return 1
 
     if args.width <= 0:
-        log.error("--width must be positive (got %g)", args.width)
+        log.error(f"--width must be positive (got {args.width})")
         return 1
 
     if args.plate_thickness <= 0:
-        log.error("--plate-thickness must be positive (got %g)", args.plate_thickness)
+        log.error(f"--plate-thickness must be positive (got {args.plate_thickness})")
         return 1
 
     if args.min_line_width <= 0:
-        log.error("--min-line-width must be positive (got %g)", args.min_line_width)
+        log.error(f"--min-line-width must be positive (got {args.min_line_width})")
         return 1
 
     if args.curve_segments < 4:
-        log.error("--curve-segments must be at least 4 (got %d)", args.curve_segments)
+        log.error(f"--curve-segments must be at least 4 (got {args.curve_segments})")
         return 1
 
-    output_path = resolve_output_path(args.input, args.output)
+    if args.stl_ascii and args.stl_binary:
+        log.error("Cannot specify both -stl-ascii and -stl-binary.")
+        return 1    
+        
+    if args.output:
+        output_path = args.output
+    else:
+        directory = os.path.dirname(args.input)
+        base = os.path.splitext(os.path.basename(args.input))[0]
+        output_path = os.path.join(directory, f"{base}.stl")
+
     use_binary_stl = not args.stl_ascii
 
-    # ── Determine input type ──────────────────────────────────────────────────
+    # Determine input type
     ext = os.path.splitext(args.input)[1].lower()
-    is_svg = ext == ".svg"
 
-    # ── Check external dependencies ───────────────────────────────────────────
-    if not is_svg and args.vectorizer != "none":
-        ok = check_dependencies(args.vectorizer, log)
-        if not ok:
+    # Check external dependencies -
+    if ext == ".svg" and args.vectorizer == "potrace":
+        path = shutil.which("potrace")
+        if path:
+            try:
+                result = subprocess.run(["potrace", "--version"], capture_output=True, text=True, timeout=5)
+                version_line = result.stdout.splitlines()[0] if result.stdout else "unknown"
+                log.debug(f"Found potrace: {path} ({version_line})")
+            except Exception:
+                log.debug(f"Found potrace at {path} (version unknown)")
+        else: 
+            log.error(
+                "Vectorizer 'potrace' not found on PATH.\n\n"
+                "Install it with one of:\n"
+                "Ubuntu/Debian : sudo apt install potrace\n"
+                "macOS (brew)  : brew install potrace\n"
+                "Windows       : https://potrace.sourceforge.net/\n\n"
+                "Or choose a different vectorizer with -vectorizer vtracer"
+            )
             return 1
-
-    # ── Process input ─────────────────────────────────────────────────────────
+        
+    # Process input
     t_start = time.perf_counter()
-    shapes = []         # list of Shape objects: (outer_contour, [hole_contour, ...])
+    shapes = []
     image_width_mm = args.width
     image_height_mm = None   # filled in after we know aspect ratio
 
-    if is_svg:
-        log.info("Reading SVG file: %s", args.input)
+    if ext == ".svg":
+        log.info(f"Reading SVG from '{args.input}'")
         svg_parser = SVGParser(
             min_line_width_mm=args.min_line_width,
             curve_segments=args.curve_segments,
@@ -280,13 +336,9 @@ def main() -> int:
         shapes, (svg_w, svg_h) = svg_parser.parse(args.input)
         aspect = svg_h / svg_w if svg_w else 1.0
         image_height_mm = image_width_mm * aspect
-        log.info(
-            "SVG parsed: %d path(s), document size %.2f×%.2f user units",
-            len(shapes), svg_w, svg_h,
-        )
-
+        log.info(f"SVG parsed: {len(shapes)} path(s), document size {svg_w:.2f}x{svg_h:.2f} user units")
     else:
-        log.info("Reading raster image: %s", args.input)
+        log.info(f"Reading raster image from '{args.input}'")
         processor = ImageProcessor(
             threshold=args.threshold,
             invert=args.invert,
@@ -305,15 +357,12 @@ def main() -> int:
         image_height_mm = image_width_mm * aspect
 
     if not shapes:
-        log.warning("No geometry found in input — the STL will contain only the base plate.")
+        log.warning("No geometry found in input - the STL will contain only the base plate.")
 
-    log.info(
-        "Output plate: %.2f × %.2f mm  |  plate thickness: %.2f mm  |  relief: %.2f mm",
-        image_width_mm, image_height_mm, args.plate_thickness, args.relief_height,
-    )
+    log.info(f"Output plate: {image_width_mm:.2f}x{image_height_mm:.2f}mm, Plate thickness: {args.plate_thickness:.2f}mm, Relief: {args.relief_height:.2f}mm")
 
-    # ── Build STL ─────────────────────────────────────────────────────────────
-    log.info("Building STL geometry…")
+    # Build STL
+    log.info("Building STL geometry")
     builder = STLBuilder(
         plate_width_mm=image_width_mm,
         plate_height_mm=image_height_mm,
@@ -326,12 +375,9 @@ def main() -> int:
     triangle_count = builder.build_and_write(shapes, output_path)
 
     elapsed = time.perf_counter() - t_start
-    log.info(
-        "Done! Wrote %d triangles to '%s' in %.2f s",
-        triangle_count, output_path, elapsed,
-    )
+    log.info(f"Done! Wrote {triangle_count} triangles to '{output_path}' in {elapsed:.2f}s")
+    
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

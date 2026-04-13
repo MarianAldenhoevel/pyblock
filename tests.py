@@ -6,7 +6,7 @@ TESTDATA_DIR = Path("./testdata")
 TEST_SCRIPT = Path("./pyBlock.py")
 MAX_RUNTIME = 20 
 
-# --- ANSI Colors ---
+# - ANSI Colors -
 YELLOW = "\033[93m"
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -16,16 +16,10 @@ def remove_artifacts():
     for file in TESTDATA_DIR.glob("*.stl"):
         file.unlink()
 
-def run_test(input_file, vectorizer, height):
-    if vectorizer:
-        ext = vectorizer + "."
-    else:
-        ext = ""
-
-    output_file = input_file.with_suffix(f".{"relief" if height>0 else "emboss"}.{ext}stl")
-
+def run_test(input_file, output_file, args):
     try:
-        cmd = [sys.executable, str(TEST_SCRIPT), "--input", str(input_file), "--output", str(output_file), "--relief-height", str(height)] + (["--vectorizer", vectorizer] if vectorizer != "" else [])
+        cmd = [sys.executable, str(TEST_SCRIPT), "--input", str(input_file), "--output", str(output_file)]
+        cmd.extend(args)
         # print(cmd)
         result = subprocess.run(
             cmd,
@@ -61,11 +55,21 @@ def main():
     failed = 0
 
     for file in test_files:
-        
+
         for height in [-1.0, 1.0]:
-            for vectorizer in [""] if file.suffix.lower() == '.svg' else ["potrace", "vtracer", "none"]:        
+            for vectorizer in [""] if file.suffix.lower() == '.svg' else ["potrace", "vtracer"]:        
                 total += 1
-                ok, reason = run_test(file, vectorizer, height)
+                
+                ext = ""
+                args = []
+                if vectorizer:
+                    args += ["--vectorizer", vectorizer]
+                    ext = vectorizer + "."
+                args += ["--relief-height", str(height)]
+
+                output_file = file.with_suffix(f".{"relief" if height>0 else "emboss"}.{ext}stl")
+
+                ok, reason = run_test(file, output_file, args)
 
                 msg = str(file) + f" {height:+}mm " + (f" (vectorizer: {vectorizer})" if vectorizer else "")
 

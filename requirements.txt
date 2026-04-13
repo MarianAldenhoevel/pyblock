@@ -6,7 +6,7 @@ Pillow>=10.0.0
 
 # (No other Python-only runtime dependencies)
 #
-# External program dependencies (not pip-installable — install via OS package manager):
+# External program dependencies (not pip-installable - install via OS package manager):
 #
 #   potrace  >= 1.16   https://potrace.sourceforge.net/
 #     Ubuntu/Debian : sudo apt install potrace

@@ -1,21 +1,3 @@
-"""
-image_processor.py — Raster image loading, 1-bit quantisation, and vectorisation.
-
-Pipeline
---------
-1. Load the image with Pillow.
-2. Convert to grayscale.
-3. Quantise to 1-bit
-4. Print quantisation statistics to the console.
-5. Vectorise the 1-bit image via:
-      • potrace  — invokes the system 'potrace' binary
-      • vtracer  — invokes the system 'vtracer' binary
-      • none     — pixel-grid marching-squares fallback
-6. Return a list of closed polygons in *image* coordinate space,
-   normalised so the image fits inside a 1×1 box,
-   plus the original pixel dimensions.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -29,15 +11,12 @@ from typing import Sequence
 
 log = logging.getLogger("pyblock.image")
 
-# Optional imports — import errors are caught at call time so the module always loads.
+# Optional imports - import errors are caught at call time so the module always loads.
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
     _PILLOW_OK = True
 except ImportError:
     _PILLOW_OK = False
-
-
-# ── Public class ──────────────────────────────────────────────────────────────
 
 class ImageProcessor:
     """Load a raster image and return vectorised geometry."""
@@ -46,13 +25,16 @@ class ImageProcessor:
         self,
         threshold: int = 128,
         invert: bool = False,
-        vectorizer: str = "potrace",
+        vectorizer: str = "vtracer",
+        
         potrace_threshold: float = 0.5,
         potrace_turdsize: int = 2,
         potrace_alphamax: float = 1.0,
         potrace_opttolerance: float = 0.2,
+        
         vtracer_color_precision: int = 6,
         vtracer_filter_speckle: int = 4,
+        
         min_line_width_mm: float = 1.0,
         curve_segments: int = 16,
     ) -> None:
@@ -68,72 +50,41 @@ class ImageProcessor:
         self.min_line_width_mm    = min_line_width_mm
         self.curve_segments       = curve_segments
 
-    # ── Main entry point ──────────────────────────────────────────────────────
+    '''
+        Return type WTFeckery:
 
-    def process(
-        self, path: str
-    ) -> tuple[list[list[tuple[float, float]]], tuple[int, int]]:
-        """
-        Process *path* and return:
-          (paths, (width_px, height_px))
-
-        Each path is a closed list of (x, y) points normalised to [0, 1] in the
-        image's coordinate space (origin = top-left, y grows downward).
-        """
+        Return a list of closed polygons in image coordinate space,
+        normalised so the image fits inside a 1×1 box,
+        plus the original pixel dimensions.
+    '''
+    def process(self, path: str) -> tuple[list[list[tuple[float, float]]], tuple[int, int]]:
         if not _PILLOW_OK:
             raise ImportError(
                 "Pillow is required for raster image processing.\n"
-                "Install it with:  pip install Pillow"
+                "Install it with: pip install Pillow"
             )
 
-        log.info("Loading image…")
+        log.info("Loading image")
         img = Image.open(path)
-        log.info(
-            "  Mode: %s  |  Size: %d×%d px  |  Format: %s",
-            img.mode, img.width, img.height, img.format,
-        )
+        log.info(f"Image loaded. Mode: {img.mode}, Size: {img.width}x{img.height}px, Format: {img.format}")
 
         orig_w, orig_h = img.width, img.height
 
         # Convert to grayscale
         if img.mode != "L":
             img = img.convert("L")
-            log.debug("  Converted to grayscale.")
+            log.debug("Converted to grayscale.")
 
         # 1-bit quantisation
-        img_1bit = self._quantise(img)
-
-        # Statistics
-        self._print_stats(img_1bit, orig_w, orig_h)
-
-        # Vectorise
-        paths = self._vectorise(img_1bit, orig_w, orig_h)
-
-        return paths, (orig_w, orig_h)
-
-    # ── Quantisation ──────────────────────────────────────────────────────────
-
-    def _quantise(self, img_gray: "Image.Image") -> "Image.Image":
-        """Return a 1-bit (mode '1') PIL image."""
-        import PIL.Image as PILImage
-
-        log.info("Quantising to 1-bit with threshold %d…", self.threshold)
-        # Point transform: pixel >= threshold → 255 (white), else 0 (black)
-        img_thresh = img_gray.point(lambda p: 255 if p >= self.threshold else 0)
+        log.info(f"Quantising to 1-bit with threshold {self.threshold}")
+        img_thresh = img.point(lambda p: 255 if p >= self.threshold else 0)
         img_1bit = img_thresh.convert("1")
 
         if self.invert:
-            from PIL import ImageOps
             log.info("Inverting 1-bit image.")
             img_1bit = ImageOps.invert(img_1bit.convert("L")).convert("1")
 
-        return img_1bit
-
-    # ── Statistics ────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _print_stats(img_1bit: "Image.Image", w: int, h: int) -> None:
-        total = w * h
+        total = img.width * img.height
         # PIL mode '1' stores pixels as 0 or 255 when accessed via getdata()
         pixels = list(img_1bit.getdata())
         black  = sum(1 for p in pixels if p == 0)
@@ -141,40 +92,28 @@ class ImageProcessor:
         pct_b  = 100.0 * black / total if total else 0.0
         pct_w  = 100.0 * white / total if total else 0.0
 
-        log.info("  ┌── 1-bit quantisation statistics ──────────────────")
-        log.info("  │  Total pixels : %10d", total)
-        log.info("  │  Black (set)  : %10d  (%5.1f %%)  — will form relief", black, pct_b)
-        log.info("  │  White (bg)   : %10d  (%5.1f %%)  — base plate only", white, pct_w)
-        log.info("  └───────────────────────────────────────────────────")
-
-    # ── Vectorisation dispatch ────────────────────────────────────────────────
-
-    def _vectorise(
-        self, img_1bit: "Image.Image", w: int, h: int
-    ) -> list[list[tuple[float, float]]]:
+        log.info(f"Quantisation stats: Total {total}px, Relief {black}px ({pct_b:.1f} %), Base {white}px ({pct_w:.1f} %)")
+        
         if self.vectorizer == "potrace":
-            return self._vectorise_potrace(img_1bit, w, h)
+            paths = self._vectorise_potrace(img_1bit)
         elif self.vectorizer == "vtracer":
-            return self._vectorise_vtracer(img_1bit, w, h)
+            paths = self._vectorise_vtracer(img_1bit)
         else:
-            log.info("Vectorizer: none — using pixel-grid outline extraction.")
-            return self._vectorise_pixels(img_1bit, w, h)
+            raise ValueError(f"Unknown vectorizer: {self.vectorizer}")
 
-    # ── potrace ───────────────────────────────────────────────────────────────
+        return paths, (orig_w, orig_h)
 
-    def _vectorise_potrace(
-        self, img_1bit: "Image.Image", w: int, h: int
-    ) -> list[list[tuple[float, float]]]:
-        log.info("Vectorising with potrace…")
+    def _vectorise_potrace(self, img) -> list[list[tuple[float, float]]]:
+        log.info("Vectorising with potrace")
+        
         with tempfile.TemporaryDirectory() as tmp:
             bmp_path = os.path.join(tmp, "input.bmp")
             svg_path = os.path.join(tmp, "output.svg")
 
-            # potrace reads BMP; save the 1-bit image as an 8-bit greyscale BMP
-            # (potrace interprets dark pixels as foreground)
-            img_1bit.convert("L").save(bmp_path)
+            # potrace reads BMP. Save the 1-bit image as an 8-bit greyscale BMP
+            img.convert("L").save(bmp_path)
 
-            log.debug(f"  Saved quantized image as {bmp_path}")
+            log.debug(f"Saved quantized image as {bmp_path}")
 
             cmd = [
                 "potrace",
@@ -186,43 +125,32 @@ class ImageProcessor:
                 "--output", svg_path,
                 bmp_path,
             ]
-            log.debug("  Command: %s", " ".join(cmd))
+            log.debug(f"Command: {' '.join(cmd)}")
+            
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             except subprocess.TimeoutExpired:
                 raise RuntimeError("potrace timed out after 120s")
             if result.returncode != 0:
-                raise RuntimeError(
-                    f"potrace failed (exit {result.returncode}):\n{result.stderr}"
-                )
+                raise RuntimeError(f"potrace failed (exit {result.returncode}):\n{result.stderr}")
             if result.stderr:
-                log.debug("  potrace stderr: %s", result.stderr.strip())
+                log.debug(f"potrace stderr: {result.stderr.strip()}")
 
-            paths = _parse_svg_paths(svg_path, w, h, self.curve_segments)
+            paths = _parse_svg_paths(svg_path, img.width, img.height, self.curve_segments)
 
-        log.info("  potrace produced %d path(s).", len(paths))
+        log.info(f"Potrace produced {len(paths)} path(s)")
+        
         return paths
 
-    # ── vtracer ───────────────────────────────────────────────────────────────
+    def _vectorise_vtracer(self, img_1bit) -> list[tuple[list[tuple[float, float]], list]]:        
+        log.info("Vectorising with vtracer")
 
-    def _vectorise_vtracer(
-        self, img_1bit: "Image.Image", w: int, h: int
-    ) -> list[tuple[list[tuple[float, float]], list]]:
-        """
-        Vectorise using the vtracer Python library (no subprocess or temp files).
-
-        vtracer.convert_pixels_to_svg() takes raw RGBA pixel data and returns
-        an SVG string directly in memory.  The output SVG has no group-level
-        transform (unlike potrace); instead each <path> carries its own
-        transform="translate(x,y)" which our _parse_svg_paths walker handles.
-        """
-        log.info("Vectorising with vtracer…")
         try:
             import vtracer as _vtracer
         except ImportError:
             raise ImportError(
-                "The 'vtracer' Python package is required for --vectorizer vtracer.\n"
-                "Install it with:  pip install vtracer"
+                "The 'vtracer' Python package is required for -vectorizer vtracer.\n"
+                "Install it with: pip install vtracer"
             )
 
         # vtracer needs RGBA pixel data as a tuple of (R,G,B,A) tuples.
@@ -233,109 +161,28 @@ class ImageProcessor:
 
         svg_str = _vtracer.convert_pixels_to_svg(
             pixel_data,
-            size=(w, h),
+            size=(img_1bit.width, img_1bit.height),
             colormode="binary",
             filter_speckle=self.vtracer_filter_speckle,
             color_precision=self.vtracer_color_precision,
         )
-        log.debug("  vtracer returned %d bytes of SVG", len(svg_str))
+        log.debug(f"Vtracer returned {len(svg_str)} bytes of SVG")
 
-        # Parse the in-memory SVG string through a temporary file so we can
+        # Dump SVG string to a temporary file so we can
         # reuse _parse_svg_paths (which uses ElementTree.parse on a path).
-        import tempfile, os
-        with tempfile.NamedTemporaryFile(suffix=".svg", mode="w",
-                                         encoding="utf-8", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".svg", mode="w", encoding="utf-8", delete=False) as f:
             f.write(svg_str)
             tmp_path = f.name
         try:
-            shapes = _parse_svg_paths(tmp_path, w, h, self.curve_segments)
+            shapes = _parse_svg_paths(tmp_path, img_1bit.width, img_1bit.height, self.curve_segments)
         finally:
             os.unlink(tmp_path)
 
-        log.info("  vtracer produced %d shape(s).", len(shapes))
+        log.info(f"Vtracer produced {len(shapes)} shape(s)")
+        
         return shapes
 
-    # ── pixel-grid / contour fallback ────────────────────────────────────────
-
-    def _vectorise_pixels(
-        self, img_1bit: "Image.Image", w: int, h: int
-    ) -> list[tuple[list[tuple[float, float]], list]]:
-        """
-        Vectorise the 1-bit image by tracing pixel-exact outlines.
-
-        Uses skimage.measure.find_contours (Marching Squares) when available,
-        which produces proper closed polygons with hole detection — letter
-        counters ('o', 'e', 'B' etc.) become holes, giving manifold STL output.
-
-        Falls back to a simple horizontal pixel-run approach if skimage is not
-        installed.  The fallback produces valid geometry but adjacent runs share
-        walls, which some slicers will repair automatically.
-        """
-        try:
-            import numpy as np
-            from skimage import measure as _skm
-            return self._vectorise_pixels_contour(img_1bit, w, h, np, _skm)
-        except ImportError:
-            log.warning(
-                "scikit-image not installed — using pixel-run fallback.\n"
-                "  Install it for better results:  pip install scikit-image"
-            )
-            return self._vectorise_pixels_runs(img_1bit, w, h)
-
-    def _vectorise_pixels_contour(
-        self, img_1bit: "Image.Image", w: int, h: int, np, skm
-    ) -> list[tuple[list[tuple[float, float]], list]]:
-        """Marching-squares contour tracing via scikit-image."""
-        log.info("  Tracing pixel contours (%d×%d) via scikit-image…", w, h)
-
-        # Build binary array: 1 = foreground (black), 0 = background
-        arr = np.array(img_1bit.convert("L"))
-        binary = (arr < 128).astype(np.uint8)
-
-        # Pad with zeros so contours at the image border close properly
-        padded = np.pad(binary, 1, constant_values=0)
-
-        # find_contours returns sub-pixel contours in (row, col) order
-        contours_rc = skm.find_contours(padded, 0.5)
-        # Undo the 1-pixel padding offset
-        contours_rc = [c - 1 for c in contours_rc]
-
-        # Convert (row, col) → normalised (x, y) = (col/w, row/h)
-        def to_xy(c_rc):
-            return [(float(col) / w, float(row) / h) for row, col in c_rc]
-
-        # Build flat list of (normalised_pts, signed_area) for grouping
-        sub_paths = [to_xy(c) for c in contours_rc]
-
-        log.info("  Contour tracing produced %d contour(s).", len(sub_paths))
-
-        # _group_sub_paths classifies by winding: positive area = outer, negative = hole
-        # Pass svg_w=1, svg_h=1 because pts are already normalised
-        return _group_sub_paths(sub_paths, 1.0, 1.0)
-
-    def _vectorise_pixels_runs(
-        self, img_1bit: "Image.Image", w: int, h: int
-    ) -> list[tuple[list[tuple[float, float]], list]]:
-        """Fallback: merge horizontal pixel runs into rectangle shapes."""
-        log.info("  Building pixel-run geometry (%d×%d)…", w, h)
-        pixels = img_1bit.load()
-        shapes = []
-        for y in range(h):
-            x_start: int | None = None
-            for x in range(w):
-                is_black = (pixels[x, y] == 0)
-                if is_black and x_start is None:
-                    x_start = x
-                elif not is_black and x_start is not None:
-                    shapes.append((_rect_path(x_start, y, x, y + 1, w, h), []))
-                    x_start = None
-            if x_start is not None:
-                shapes.append((_rect_path(x_start, y, w, y + 1, w, h), []))
-        log.info("  Pixel-run fallback produced %d rectangle(s).", len(shapes))
-        return shapes
-
-
-# ── SVG path parser (shared by potrace + vtracer outputs) ────────────────────
+# SVG path parser (shared by potrace + vtracer outputs)
 
 def _signed_area_2d(pts: list[tuple[float, float]]) -> float:
     """Shoelace signed area. Positive = CCW, negative = CW."""
@@ -376,7 +223,7 @@ def _group_sub_paths(
     sign the caller uses for outers vs holes.
 
     Algorithm
-    ---------
+    -
     1. Normalise to [0,1]x[0,1] and compute signed areas.
     2. Sort by absolute area descending.  The largest contour is always an
        outer shell; smaller contours are classified relative to it.
@@ -536,7 +383,7 @@ def _parse_svg_paths(
     return shapes
 
 
-# ── SVG 'd' attribute tessellator ─────────────────────────────────────────────
+# SVG 'd' attribute tessellator -
 
 def _tessellate_svg_d(
     d: str, curve_segments: int
@@ -665,7 +512,7 @@ def _tessellate_svg_d(
     return paths
 
 
-# ── Bezier / arc helpers ──────────────────────────────────────────────────────
+# Bezier / arc helpers --
 
 def _cubic_bezier(
     x0: float, y0: float,
@@ -767,7 +614,7 @@ def _arc(
     return pts
 
 
-# ── Tokeniser ─────────────────────────────────────────────────────────────────
+# Tokeniser -------------
 
 _PATH_RE = re.compile(
     r"([MmZzLlHhVvCcSsQqTtAa])|([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)"
@@ -783,7 +630,7 @@ def _is_cmd(token: str) -> bool:
     return token in _CMD_CHARS
 
 
-# ── Rectangle path helper ─────────────────────────────────────────────────────
+# Rectangle path helper -
 
 def _rect_path(
     x0: int, y0: int, x1: int, y1: int, w: int, h: int

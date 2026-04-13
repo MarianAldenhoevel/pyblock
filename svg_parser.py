@@ -1,17 +1,17 @@
 """
-svg_parser.py — Direct SVG file reader for pyBlock.
+svg_parser.py - Direct SVG file reader for pyBlock.
 
 Handles:
-  • <path>               — arbitrary filled or stroked paths
-  • <rect>               — rectangles
-  • <circle>             — circles
-  • <ellipse>            — ellipses
-  • <line>               — single line segments (given minimum width → rect)
-  • <polyline>           — open polylines (stroked, given min width)
-  • <polygon>            — closed filled polygons
-  • <g>                  — groups (recursed into, transforms applied)
+  • <path>               - arbitrary filled or stroked paths
+  • <rect>               - rectangles
+  • <circle>             - circles
+  • <ellipse>            - ellipses
+  • <line>               - single line segments (given minimum width → rect)
+  • <polyline>           - open polylines (stroked, given min width)
+  • <polygon>            - closed filled polygons
+  • <g>                  - groups (recursed into, transforms applied)
 
-All shapes — regardless of their fill/stroke colour — are treated as
+All shapes - regardless of their fill/stroke colour - are treated as
 "active" geometry and contribute to the relief.
 
 Returns paths in *normalised* [0,1]×[0,1] coordinate space.
@@ -63,7 +63,7 @@ class SVGParser:
         # Strip namespace from tag names for simpler matching
         _strip_ns(root)
 
-        # ── Viewport ──────────────────────────────────────────────────────────
+        # Viewport ------
         vb = root.get("viewBox")
         if vb:
             parts = [float(x) for x in vb.replace(",", " ").split()]
@@ -88,7 +88,7 @@ class SVGParser:
         log.info("  Extracted %d shape(s) from SVG.", len(shapes))
         return shapes, (doc_w, doc_h)
 
-    # ── Element walker ────────────────────────────────────────────────────────
+    # Element walker ----
 
     def _walk(
         self,
@@ -186,7 +186,7 @@ class SVGParser:
                 self._walk(child, t, out, doc_w, doc_h)
 
 
-# ── Geometry helpers ──────────────────────────────────────────────────────────
+# Geometry helpers ------
 
 def _circle_pts(
     cx: float, cy: float, r: float, n: int
@@ -244,7 +244,7 @@ def _stroke_line(
     dx = x2 - x1; dy = y2 - y1
     length = math.hypot(dx, dy)
     if length == 0:
-        # Degenerate — return a square cap
+        # Degenerate - return a square cap
         hw = width / 2
         return [
             (x1-hw, y1-hw), (x1+hw, y1-hw),
@@ -297,10 +297,10 @@ def _strip_ns(elem: ET.Element) -> None:
         _strip_ns(child)
 
 
-# ── Transform ─────────────────────────────────────────────────────────────────
+# Transform -------------
 
 class _Transform:
-    """2-D affine transform stored as (a, b, c, d, e, f) — SVG matrix form."""
+    """2-D affine transform stored as (a, b, c, d, e, f) - SVG matrix form."""
 
     __slots__ = ("a", "b", "c", "d", "e", "f")
 

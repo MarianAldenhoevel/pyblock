@@ -1,28 +1,3 @@
-"""
-stl_builder.py — Geometry builder and STL file writer for pyBlock.
-
-Takes a list of 2-D paths (in [0,1]×[0,1] normalised space) and produces
-a single solid STL body consisting of:
-
-  1. A solid rectangular base plate.
-  2. A relief layer extruded from (or into) the top surface of the plate,
-     corresponding to the input paths.
-
-The STL is written as either binary (default, compact) or ASCII.
-
-Coordinate system
------------------
-  X — plate width   (0 … plate_width_mm)
-  Y — plate height  (0 … plate_height_mm)
-  Z — vertical      (0 = bottom of plate, plate_thickness_mm = top of plate)
-
-Relief raised above top surface: z from plate_thickness_mm
-                                         to plate_thickness_mm + relief_height_mm
-Relief embossed into plate surface (relief_height_mm < 0):
-                                       z from plate_thickness_mm + relief_height_mm
-                                                to plate_thickness_mm
-"""
-
 from __future__ import annotations
 
 import logging
@@ -40,9 +15,8 @@ Triangle = tuple[Point3, Point3, Point3]
 # A Shape is an outer contour with zero or more holes.
 # All contours are lists of (x, y) points in normalised [0,1] space.
 # Outer contour: CCW winding (positive signed area)
-# Hole contours: CW winding  (negative signed area) — they cut into the outer
+# Hole contours: CW winding  (negative signed area) - they cut into the outer
 Shape = tuple[list[Point2], list[list[Point2]]]  # (outer, [hole, ...])
-
 
 class STLBuilder:
     def __init__(
@@ -84,11 +58,11 @@ class STLBuilder:
         """
         triangles: list[Triangle] = []
 
-        # ── Base plate sides + bottom ─────────────────────────────────────────
-        log.info("  Building base plate…")
+        # Base plate sides + bottom -
+        log.info("Building base plate")
         triangles.extend(self._base_plate_sides())
 
-        # ── Relief geometry ───────────────────────────────────────────────────
+        # Relief geometry
         # Collect (outer_mm, holes_mm) for the plate top face.
         # The plate top face must have:
         #   - shape outer contours as HOLES (they open the plate surface)
@@ -97,7 +71,7 @@ class STLBuilder:
         plate_shapes_mm: list[tuple[list[Point2], list[list[Point2]]]] = []
 
         if shapes and self.rh != 0.0:
-            log.info("  Extruding %d shape(s) into relief layer…", len(shapes))
+            log.info(f"Extruding {len(shapes)} shape(s) into relief layer")
             for idx, (outer, holes) in enumerate(shapes):
                 if len(outer) < 3:
                     continue
@@ -107,24 +81,21 @@ class STLBuilder:
                 tris = self._extrude_shape(outer, holes)
                 triangles.extend(tris)
                 if (idx + 1) % 100 == 0:
-                    log.debug("    … %d / %d shapes processed.", idx+1, len(shapes))
-            log.debug("    After relief: %d triangles.", len(triangles))
+                    log.debug(f"     {idx+1} / {len(shapes)} shapes processed.")
+            log.debug(f"After relief: {len(triangles)} triangles.")
 
-        # ── Plate top face ────────────────────────────────────────────────────
+        # Plate top face
         triangles.extend(self._plate_top_face(plate_shapes_mm))
-        log.debug("    After plate top: %d triangles.", len(triangles))
+        log.debug(f"After plate top: {len(triangles)} triangles.")
 
-        # ── Write STL ─────────────────────────────────────────────────────────
-        log.info("  Writing STL to '%s' (%s)…", out_path,
-                 "binary" if self.bin else "ASCII")
+        # Write STL
+        log.info(f"Writing STL to '{out_path}' ({'binary' if self.bin else 'ASCII'})")
         if self.bin:
             _write_binary_stl(triangles, out_path)
         else:
             _write_ascii_stl(triangles, out_path, name="pyblock_relief")
 
         return len(triangles)
-
-    # ── Base plate ────────────────────────────────────────────────────────────
 
     def _base_plate_sides(self) -> list[Triangle]:
         """Bottom face + four side walls of the base plate (no top face)."""
@@ -139,39 +110,36 @@ class STLBuilder:
         tris += _quad((w,0,0), (w,h,0), (w,h,top_z), (w,0,top_z), flip=True)
         return tris
 
-    def _plate_top_face(
-        self,
-        plate_shapes_mm: list[tuple[list[Point2], list[list[Point2]]]],
-    ) -> list[Triangle]:
+    def _plate_top_face(self, plate_shapes_mm: list[tuple[list[Point2], list[list[Point2]]]]) -> list[Triangle]:
         """
         Top face of the plate at z = z_plate_top.
 
         The plate top is the visible surface of the base plate.  Wherever a
         shape sits on the plate that surface is interrupted:
 
-          • Each shape outer contour becomes a HOLE in the plate rectangle.
+          - Each shape outer contour becomes a HOLE in the plate rectangle.
             The matching surface inside that hole is provided by the shape
             extrusion (raised: the extrusion bottom; embossed: the extrusion top).
 
-          • Each shape hole contour (e.g. the counter of a letter 'e') becomes a
+          - Each shape hole contour (e.g. the counter of a letter 'e') becomes a
             FILLED ISLAND at z_plate_top.  The hole side-walls reach down to
             z_plate_top and need a floor here to close the solid.
 
-        plate_shapes_mm — list of (outer_mm, holes_mm) already in mm.
+        plate_shapes_mm - list of (outer_mm, holes_mm) already in mm.
         """
         w, h, zt = self.pw, self.ph, self.z_plate_top
         tris: list[Triangle] = []
         z = zt  # shorthand
 
-        # ── Main plate rectangle with shape-outer holes ───────────────────────
+        # Main plate rectangle with shape-outer holes -
         plate_rect: list[Point2] = [(0,0), (w,0), (w,h), (0,h), (0,0)]
         outer_footprints = [outer for outer, _ in plate_shapes_mm]
         for a, b, c in _earcut_with_holes(plate_rect, outer_footprints):
             tris.append((_p3(a, z), _p3(b, z), _p3(c, z)))
 
-        # ── Filled islands for each shape's hole contours ─────────────────────
+        # Filled islands for each shape's hole contours -
         # Each hole contour of a shape (e.g. enclosed counter of 'o', 'e', 'B')
-        # is a region where the plate top surface is visible again — the hole
+        # is a region where the plate top surface is visible again - the hole
         # side-walls bound this island and need a closed floor.
         for _, holes_mm in plate_shapes_mm:
             for hole_pts in holes_mm:
@@ -181,8 +149,7 @@ class STLBuilder:
 
         return tris
 
-    # ── Shape extrusion (outer contour + holes) ──────────────────────────────
-
+    # Shape extrusion (outer contour + holes)
     def _extrude_shape(self, outer: list[Point2], holes: list[list[Point2]]) -> list[Triangle]:
         """
         Extrude a shape (outer polygon + optional holes) into a 3-D solid
@@ -190,7 +157,7 @@ class STLBuilder:
 
         The outer contour and each hole each get side-wall quads.
         The top and bottom caps are triangulated with holes via mapbox_earcut,
-        so the hole regions are open (not capped) — they appear as pockets
+        so the hole regions are open (not capped) - they appear as pockets
         or pass-throughs depending on the relief direction.
         """
         tris: list[Triangle] = []
@@ -218,7 +185,7 @@ class STLBuilder:
         else:
             flip_cap = False
 
-        # ── Caps (top and bottom) with holes ─────────────────────────────────
+        # Caps (top and bottom) with holes
         # The cap that lies exactly at z_plate_top is NOT emitted here because
         # the plate top face (rect-minus-footprint) already closes that surface.
         # Emitting it again would create a duplicate surface with conflicting edges.
@@ -235,19 +202,16 @@ class STLBuilder:
                 # Raised: emit only the relief top cap (nz=+1 at z_top)
                 tris.append((_p3(a, z_top), _p3(b, z_top), _p3(c, z_top)))
 
-        # ── Side walls for outer contour ──────────────────────────────────────
+        # Side walls for outer contour -
         _add_walls(tris, outer_mm, z_bot, z_top, flip=False)
 
-        # ── Side walls for each hole (winding reversed so normals point inward) ─
+        # Side walls for each hole (winding reversed so normals point inward) -
         for hole_mm in holes_mm:
             _add_walls(tris, hole_mm, z_bot, z_top, flip=True)
 
         return tris
 
-
-
-# ── Polygon-with-holes triangulation via mapbox_earcut ───────────────────────
-
+# Polygon-with-holes triangulation via mapbox_earcut
 def _earcut_with_holes(
     outer_mm: list[Point2],
     holes_mm: list[list[Point2]],
@@ -255,8 +219,8 @@ def _earcut_with_holes(
     """
     Triangulate a polygon that may have holes using mapbox_earcut.
 
-    outer_mm  — outer contour (closed, i.e. first == last point)
-    holes_mm  — list of hole contours (each closed)
+    outer_mm  - outer contour (closed, i.e. first == last point)
+    holes_mm  - list of hole contours (each closed)
 
     Returns a list of (a, b, c) vertex triples in mm coordinates.
     """
@@ -274,7 +238,7 @@ def _earcut_with_holes(
     all_verts: list[Point2] = []
     ring_ends: list[int] = []          # earcut wants the END index of each ring
 
-    # Outer contour — drop closing duplicate
+    # Outer contour - drop closing duplicate
     outer_open = outer_mm[:-1] if (outer_mm and outer_mm[0] == outer_mm[-1]) else outer_mm
     # Ensure CCW (positive area) for correct earcut winding
     if _signed_area(outer_open) < 0:
@@ -335,8 +299,7 @@ def _add_walls(
         )
 
 
-# ── Quad helper ───────────────────────────────────────────────────────────────
-
+# Quad helper
 def _quad(
     a: Point3, b: Point3, c: Point3, d: Point3,
     flip: bool = False,
@@ -351,8 +314,7 @@ def _p3(p2: Point2, z: float) -> Point3:
     return (p2[0], p2[1], z)
 
 
-# ── Normal calculation ────────────────────────────────────────────────────────
-
+# Normal calculation
 def _normal(t: Triangle) -> Point3:
     a, b, c = t
     ax, ay, az = b[0]-a[0], b[1]-a[1], b[2]-a[2]
@@ -365,9 +327,7 @@ def _normal(t: Triangle) -> Point3:
         return (0.0, 0.0, 1.0)
     return (nx/mag, ny/mag, nz/mag)
 
-
-# ── STL writers ───────────────────────────────────────────────────────────────
-
+# STL writers 
 def _write_binary_stl(triangles: list[Triangle], path: str) -> None:
     """Write triangles as a binary STL file (80-byte header + triangle records)."""
     header = b"pyBlock STL output" + b" " * (80 - 18)
