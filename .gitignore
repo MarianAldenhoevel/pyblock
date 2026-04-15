@@ -2,3 +2,4 @@ potrace.exe
 potrace-*/
 __pycache__/
 testdata/*.stl
+pyblock-ui.json
