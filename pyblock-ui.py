@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+"""
+pyblock-ui.py  -  Tkinter frontend for pyBlock.
+
+Saves settings to pyblock-ui.json next to this script on exit,
+reloads them on startup.
+"""
+
 import json
 import os
 import platform
@@ -9,9 +17,13 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+# -- Locate pyblock.py relative to this script --------------------------------
+
 SCRIPT_DIR    = os.path.dirname(os.path.abspath(__file__))
 PYBLOCK_PY    = os.path.join(SCRIPT_DIR, "pyblock.py")
 SETTINGS_FILE = os.path.join(SCRIPT_DIR, "pyblock-ui.json")
+
+# -- Defaults -----------------------------------------------------------------
 
 DEFAULTS: dict = {
     "input":  "",
@@ -36,17 +48,16 @@ DEFAULTS: dict = {
     "open_after_run":     False,
 }
 
-BG      = "#1e1e2e"
-PANEL   = "#2a2a3e"
-BORDER  = "#3d3d55"
-ACCENT  = "#7c6af7"
-ACCENT2 = "#5af78e"
-WARN    = "#f7c35a"
-ERR     = "#f75a7c"
-FG      = "#cdd6f4"
-FG_DIM  = "#7c7fa3"
-BTN_FG  = "#ffffff"
+# -- Log colours (only custom styling kept) -----------------------------------
+
 LOG_BG  = "#13131f"
+LOG_FG  = "#cdd6f4"
+LOG_DIM = "#7c7fa3"
+LOG_WARN = "#f7c35a"
+LOG_ERR  = "#f75a7c"
+LOG_OK   = "#5af78e"
+
+# -- Persistence --------------------------------------------------------------
 
 def load_settings() -> dict:
     try:
@@ -63,26 +74,25 @@ def save_settings(s: dict) -> None:
     except OSError as e:
         print(f"Warning: could not save settings: {e}", file=sys.stderr)
 
+# -- Scrollable frame ---------------------------------------------------------
 
 class ScrollFrame(tk.Frame):
+    """A frame whose content scrolls vertically.  Add widgets to self.inner."""
 
     def __init__(self, parent, **kw):
         super().__init__(parent, **kw)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self._c = tk.Canvas(self, bg=BG, bd=0,
-                            highlightthickness=0, takefocus=False)
-        self._sb = ttk.Scrollbar(self, orient="vertical",
-                                 command=self._c.yview)
+        self._c = tk.Canvas(self, bd=0, highlightthickness=0, takefocus=False)
+        self._sb = ttk.Scrollbar(self, orient="vertical", command=self._c.yview)
         self._c.configure(yscrollcommand=self._sb.set)
         self._c.grid(row=0, column=0, sticky="nsew")
         self._sb.grid(row=0, column=1, sticky="ns")
 
-        self.inner = tk.Frame(self._c, bg=BG)
+        self.inner = tk.Frame(self._c)
         self.inner.columnconfigure(0, weight=1)
-        self._win = self._c.create_window((0, 0), window=self.inner,
-                                          anchor="nw")
+        self._win = self._c.create_window((0, 0), window=self.inner, anchor="nw")
 
         self.inner.bind("<Configure>", self._on_inner)
         self._c.bind("<Configure>",    self._on_canvas)
@@ -106,17 +116,15 @@ class ScrollFrame(tk.Frame):
             self._c.yview_scroll(-1 if e.num == 4 else 1, "units")
 
 
+# -- Main window --------------------------------------------------------------
+
 class App(tk.Tk):
 
     def __init__(self):
         super().__init__()
         self.title("pyBlock")
-        self.configure(bg=BG)
-        self.minsize(680, 600)
-        self.geometry("760x820")
-
-        # Apply ttk styles BEFORE any widgets are created
-        self._setup_styles()
+        self.minsize(580, 500)
+        self.geometry("700x780")
 
         self.settings = load_settings()
         self._proc = None
@@ -131,30 +139,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(80, self._poll)
 
-    def _setup_styles(self):
-        st = ttk.Style(self)
-        st.theme_use("clam")
-        st.configure("TScrollbar",
-                     background=BORDER, troughcolor=BG,
-                     arrowcolor=FG_DIM, borderwidth=0, relief="flat")
-        st.configure("TSpinbox",
-                     fieldbackground=LOG_BG, foreground=FG,
-                     background=BORDER, arrowcolor=FG,
-                     borderwidth=1, relief="flat",
-                     selectbackground=ACCENT, selectforeground=BTN_FG,
-                     insertcolor=FG)
-        st.map("TSpinbox",
-               fieldbackground=[("disabled", PANEL)],
-               foreground=[("disabled", FG_DIM)])
-        st.configure("TCombobox",
-                     fieldbackground=LOG_BG, foreground=FG,
-                     background=BORDER, arrowcolor=FG,
-                     selectbackground=ACCENT, selectforeground=BTN_FG,
-                     borderwidth=1, relief="flat")
-        st.map("TCombobox",
-               fieldbackground=[("readonly", LOG_BG)],
-               foreground=[("readonly", FG)],
-               selectbackground=[("readonly", ACCENT)])
+    # -- Variables ------------------------------------------------------------
 
     def _make_vars(self) -> dict:
         S = self.settings
@@ -182,10 +167,8 @@ class App(tk.Tk):
         }
 
     def _trace_vars(self):
-        self._vars["input"].trace_add("write",
-            lambda *_: self._auto_output())
-        self._vars["vectorizer"].trace_add("write",
-            lambda *_: self._update_vec_panel())
+        self._vars["input"].trace_add("write", lambda *_: self._auto_output())
+        self._vars["vectorizer"].trace_add("write", lambda *_: self._update_vec_panel())
 
     def _collect(self) -> dict:
         out = {}
@@ -196,30 +179,23 @@ class App(tk.Tk):
                 out[k] = DEFAULTS[k]
         return out
 
+    # -- Build layout ---------------------------------------------------------
+
     def _build(self):
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)   # paned window expands
+        self.rowconfigure(0, weight=1)   # paned window expands
 
-        # Accent strip at top
-        tk.Frame(self, bg=ACCENT, height=4).grid(row=0, column=0, sticky="ew")
-
-        # PanedWindow holds settings (top) and log (bottom) with a draggable sash
-        self._paned = tk.PanedWindow(
-            self, orient=tk.VERTICAL,
-            bg=BORDER,           # sash colour — visible contrast stripe
-            sashwidth=6,
-            sashrelief=tk.FLAT,
-            sashpad=0,
-            relief=tk.FLAT, bd=0,
-        )
-        self._paned.grid(row=1, column=0, sticky="nsew", padx=12, pady=(10, 4))
+        # PanedWindow: settings (top) + log (bottom) with draggable sash
+        self._paned = tk.PanedWindow(self, orient=tk.VERTICAL,
+                                     sashwidth=6, sashrelief=tk.RAISED)
+        self._paned.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
 
         # Scrollable settings pane
-        self._scroll = ScrollFrame(self._paned, bg=BG)
+        self._scroll = ScrollFrame(self._paned)
         self._build_settings(self._scroll.inner)
         self._paned.add(self._scroll, stretch="always", minsize=200)
 
-        # Log pane (built inline so it lives inside the paned window)
+        # Log pane
         self._log_frame = self._make_log_frame(self._paned)
         self._paned.add(self._log_frame, stretch="always", minsize=80)
 
@@ -230,72 +206,71 @@ class App(tk.Tk):
         self._build_bar()
 
     def _set_initial_sash(self):
-        """Position sash at 2/3 of available height for a 2:1 settings:log ratio."""
         total = self._paned.winfo_height()
         if total > 1:
             self._paned.sash_place(0, 0, int(total * 2 / 3))
         else:
-            # Geometry not yet resolved; retry once more
             self.after(50, self._set_initial_sash)
+
+    # -- Settings -------------------------------------------------------------
 
     def _build_settings(self, p):
         p.columnconfigure(0, weight=1)
         row = 0
-        row = self._section(p, row, "Input / Output",     self._sec_io)
-        row = self._section(p, row, "Plate Geometry",     self._sec_geom)
-        row = self._section(p, row, "Raster Processing",  self._sec_raster)
-        row = self._section(p, row, "Vectorization",      self._sec_vec)
-        row = self._section(p, row, "STL Output",         self._sec_stl)
-        row = self._section(p, row, "Miscellaneous",      self._sec_misc)
+        row = self._section(p, row, "Input / Output",    self._sec_io)
+        row = self._section(p, row, "Plate Geometry",    self._sec_geom)
+        row = self._section(p, row, "Raster Processing", self._sec_raster)
+        row = self._section(p, row, "Vectorization",     self._sec_vec)
+        row = self._section(p, row, "STL Output",        self._sec_stl)
+        row = self._section(p, row, "Miscellaneous",     self._sec_misc)
 
     def _section(self, parent, r, title, builder):
-        tk.Label(parent, text=title.upper(), bg=BG, fg=ACCENT,
-                 font=("TkDefaultFont", 8, "bold"),
-                 anchor="w", padx=4, pady=6).grid(
+        tk.Label(parent, text=title, font=("TkDefaultFont", 9, "bold"),
+                 anchor="w", padx=4, pady=4).grid(
             row=r, column=0, sticky="ew")
-        box = tk.Frame(parent, bg=PANEL,
-                       highlightthickness=1, highlightbackground=BORDER)
-        box.grid(row=r+1, column=0, sticky="ew", pady=(0, 6))
-        # col 0 = row label, col 1 = widget, col 2 = spacer (absorbs slack),
-        # col 3 = note.  Stretch widgets (file rows) span cols 1-2 instead.
+        box = ttk.LabelFrame(parent, text="")
+        box.grid(row=r+1, column=0, sticky="ew", padx=4, pady=(0, 6))
+        # col 0 = row label (fixed), col 1 = widget (fixed),
+        # col 2 = spacer (weight=1, absorbs slack), col 3 = note (fixed)
         box.columnconfigure(1, weight=0)
         box.columnconfigure(2, weight=1)
         builder(box)
         return r + 2
 
     def _row(self, box, r, label, widget, note=""):
-        tk.Label(box, text=label, bg=PANEL, fg=FG,
-                 font=("TkDefaultFont", 10), anchor="w",
-                 padx=10, pady=5).grid(row=r, column=0, sticky="w")
-        # File-entry frames stretch across cols 1+2 (the widget + spacer cols).
-        # Everything else (spinboxes, checkboxes, comboboxes) sits at natural
-        # width in col 1 only, leaving col 2 as the spacer that absorbs slack.
+        tk.Label(box, text=label, anchor="w",
+                 padx=8, pady=4).grid(row=r, column=0, sticky="w")
+        # File-entry frames (entry + browse btn) span the widget + spacer cols.
+        # All other widgets sit at natural width in col 1 only.
         is_stretch = isinstance(widget, tk.Frame)
         if is_stretch:
             widget.grid(row=r, column=1, columnspan=2,
-                        sticky="ew", padx=(4, 6), pady=3)
+                        sticky="ew", padx=(2, 4), pady=2)
         else:
             widget.grid(row=r, column=1,
-                        sticky="w", padx=(4, 6), pady=3)
+                        sticky="w", padx=(2, 4), pady=2)
         if note:
-            # Note always goes in col 3, right after the spacer col — so it
-            # sits close to the widget regardless of window width.
-            tk.Label(box, text=note, bg=PANEL, fg=FG_DIM,
-                     font=("TkDefaultFont", 9),
-                     anchor="w").grid(row=r, column=3, sticky="w",
-                                      padx=(2, 8))
+            tk.Label(box, text=note, foreground="grey", anchor="w",
+                     font=("TkDefaultFont", 9)).grid(
+                row=r, column=3, sticky="w", padx=(2, 8))
+
+    # Section content ---------------------------------------------------------
 
     def _sec_io(self, box):
-        f0 = tk.Frame(box, bg=PANEL)
+        f0 = tk.Frame(box)
         f0.columnconfigure(0, weight=1)
-        self._entry(f0, "input").grid(row=0, column=0, sticky="ew")
-        self._sbtn(f0, "...", self._browse_in).grid(row=0, column=1, padx=(4,0))
+        ttk.Entry(f0, textvariable=self._vars["input"]).grid(
+            row=0, column=0, sticky="ew")
+        ttk.Button(f0, text="...", width=3,
+                   command=self._browse_in).grid(row=0, column=1, padx=(2, 0))
         self._row(box, 0, "Input file", f0)
 
-        f1 = tk.Frame(box, bg=PANEL)
+        f1 = tk.Frame(box)
         f1.columnconfigure(0, weight=1)
-        self._entry(f1, "output").grid(row=0, column=0, sticky="ew")
-        self._sbtn(f1, "...", self._browse_out).grid(row=0, column=1, padx=(4,0))
+        ttk.Entry(f1, textvariable=self._vars["output"]).grid(
+            row=0, column=0, sticky="ew")
+        ttk.Button(f1, text="...", width=3,
+                   command=self._browse_out).grid(row=0, column=1, padx=(2, 0))
         self._row(box, 1, "Output STL", f1)
 
     def _sec_geom(self, box):
@@ -310,16 +285,13 @@ class App(tk.Tk):
             self._spinf(box, "min_line_width", 0.1, 20, 0.1), "mm")
 
     def _sec_raster(self, box):
-        sf = tk.Frame(box, bg=PANEL)
+        sf = tk.Frame(box)
         sf.columnconfigure(0, weight=1)
         tk.Scale(sf, variable=self._vars["threshold"],
                  from_=0, to=255, orient=tk.HORIZONTAL,
-                 bg=PANEL, fg=FG, troughcolor=BORDER,
-                 activebackground=ACCENT, highlightthickness=0,
-                 bd=0, sliderlength=14, showvalue=True,
-                 font=("TkDefaultFont", 9)).grid(row=0, column=0, sticky="ew")
+                 showvalue=True).grid(row=0, column=0, sticky="ew")
         self._row(box, 0, "Threshold", sf, "0 - 255")
-        self._row(box, 1, "Invert", self._chk(box, "invert"))
+        self._row(box, 1, "Invert", ttk.Checkbutton(box, variable=self._vars["invert"]))
 
     def _sec_vec(self, box):
         cb = ttk.Combobox(box, textvariable=self._vars["vectorizer"],
@@ -327,7 +299,7 @@ class App(tk.Tk):
                           state="readonly", width=12)
         self._row(box, 0, "Engine", cb)
 
-        self._potrace_box = tk.Frame(box, bg=PANEL)
+        self._potrace_box = tk.Frame(box)
         self._potrace_box.columnconfigure(1, weight=0)
         self._potrace_box.columnconfigure(2, weight=1)
         self._row(self._potrace_box, 0, "  Blacklevel",
@@ -343,7 +315,7 @@ class App(tk.Tk):
             self._spinf(self._potrace_box, "potrace_opttolerance", 0, 2, 0.05))
         self._potrace_box.grid(row=1, column=0, columnspan=3, sticky="ew")
 
-        self._vtracer_box = tk.Frame(box, bg=PANEL)
+        self._vtracer_box = tk.Frame(box)
         self._vtracer_box.columnconfigure(1, weight=0)
         self._vtracer_box.columnconfigure(2, weight=1)
         self._row(self._vtracer_box, 0, "  Color precision",
@@ -355,92 +327,73 @@ class App(tk.Tk):
         self._vtracer_box.grid(row=1, column=0, columnspan=3, sticky="ew")
 
     def _sec_stl(self, box):
-        self._row(box, 0, "ASCII STL", self._chk(box, "stl_ascii"),
+        self._row(box, 0, "ASCII STL",
+                  ttk.Checkbutton(box, variable=self._vars["stl_ascii"]),
                   "binary is smaller and faster")
         self._row(box, 1, "Curve segments",
                   self._spini(box, "curve_segments", 4, 128), "per curve")
 
     def _sec_misc(self, box):
-        self._row(box, 0, "Verbose logging", self._chk(box, "verbose"))
+        self._row(box, 0, "Verbose logging",
+                  ttk.Checkbutton(box, variable=self._vars["verbose"]))
 
     # -- Log ------------------------------------------------------------------
 
     def _make_log_frame(self, parent) -> tk.Frame:
-        """Build the log output pane and return it (for use inside PanedWindow)."""
-        outer = tk.Frame(parent, bg=BG)
+        outer = tk.Frame(parent)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
 
-        tk.Label(outer, text="OUTPUT", bg=BG, fg=ACCENT,
-                 font=("TkDefaultFont", 8, "bold"),
+        tk.Label(outer, text="Output", font=("TkDefaultFont", 9, "bold"),
                  anchor="w", padx=4).grid(row=0, column=0, sticky="ew")
 
-        box = tk.Frame(outer, bg=PANEL,
-                       highlightthickness=1, highlightbackground=BORDER)
-        box.grid(row=1, column=0, sticky="nsew")
+        box = tk.Frame(outer)
+        box.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
         box.columnconfigure(0, weight=1)
         box.rowconfigure(0, weight=1)
 
         self._log = tk.Text(
-            box, bg=LOG_BG, fg=FG, insertbackground=FG,
-            font=("Consolas", 10), relief=tk.FLAT, bd=0,
+            box,
+            bg=LOG_BG, fg=LOG_FG, insertbackground=LOG_FG,
+            font=("Consolas", 10), relief=tk.SUNKEN, bd=1,
             wrap=tk.WORD, state=tk.DISABLED,
-            selectbackground=ACCENT, selectforeground=BTN_FG,
-            padx=8, pady=6)
+            padx=6, pady=4)
         sb = ttk.Scrollbar(box, command=self._log.yview)
         self._log.configure(yscrollcommand=sb.set)
         self._log.grid(row=0, column=0, sticky="nsew")
         sb.grid(row=0, column=1, sticky="ns")
 
-        for tag, col in [("INFO", FG), ("DEBUG", FG_DIM), ("WARN", WARN),
-                         ("ERROR", ERR), ("FATAL", ERR), ("ok", ACCENT2)]:
-            self._log.tag_configure(tag, foreground=col)
+        self._log.tag_configure("INFO",  foreground=LOG_FG)
+        self._log.tag_configure("DEBUG", foreground=LOG_DIM)
+        self._log.tag_configure("WARN",  foreground=LOG_WARN)
+        self._log.tag_configure("ERROR", foreground=LOG_ERR)
+        self._log.tag_configure("FATAL", foreground=LOG_ERR)
+        self._log.tag_configure("ok",    foreground=LOG_OK)
 
         return outer
 
     # -- Action bar -----------------------------------------------------------
 
     def _build_bar(self):
-        bar = tk.Frame(self, bg=PANEL,
-                       highlightthickness=1, highlightbackground=BORDER)
-        bar.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
+        bar = tk.Frame(self)
+        bar.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
         bar.columnconfigure(2, weight=1)
 
-        for col, key, text in [(0, "overwrite",     "Overwrite output"),
-                               (1, "open_after_run", "Open STL after run")]:
-            tk.Checkbutton(bar, text=text, variable=self._vars[key],
-                           bg=PANEL, fg=FG,
-                           activebackground=PANEL, activeforeground=FG,
-                           selectcolor=BORDER,
-                           font=("TkDefaultFont", 10),
-                           relief=tk.FLAT, bd=0, pady=6).grid(
-                row=0, column=col, padx=(10, 2))
+        ttk.Checkbutton(bar, text="Overwrite output",
+                        variable=self._vars["overwrite"]).grid(
+            row=0, column=0, padx=(4, 8), pady=4)
+        ttk.Checkbutton(bar, text="Open STL after run",
+                        variable=self._vars["open_after_run"]).grid(
+            row=0, column=1, padx=(0, 8), pady=4)
 
-        tk.Button(bar, text="Reset to defaults", command=self._reset,
-                  bg=BORDER, fg=BTN_FG,
-                  activebackground=FG_DIM, activeforeground=BTN_FG,
-                  relief=tk.FLAT, bd=0, padx=12, pady=7,
-                  font=("TkDefaultFont", 10), cursor="hand2").grid(
-            row=0, column=3, padx=(0, 8), pady=6)
+        ttk.Button(bar, text="Reset to defaults",
+                   command=self._reset).grid(
+            row=0, column=3, padx=(0, 6), pady=4)
 
-        self._run_btn = tk.Button(
-            bar, text="Run pyBlock", command=self._run,
-            bg=ACCENT, fg=BTN_FG,
-            activebackground="#9d8fff", activeforeground=BTN_FG,
-            relief=tk.FLAT, bd=0, padx=16, pady=7,
-            font=("TkDefaultFont", 11, "bold"), cursor="hand2")
-        self._run_btn.grid(row=0, column=4, padx=(0, 10), pady=6)
+        self._run_btn = ttk.Button(bar, text="Run pyBlock", command=self._run)
+        self._run_btn.grid(row=0, column=4, padx=(0, 4), pady=4)
 
     # -- Widget factories -----------------------------------------------------
-
-    def _entry(self, parent, key):
-        return tk.Entry(parent, textvariable=self._vars[key],
-                        bg=LOG_BG, fg=FG, insertbackground=FG,
-                        relief=tk.FLAT, bd=3,
-                        font=("TkDefaultFont", 10),
-                        highlightthickness=1,
-                        highlightbackground=BORDER,
-                        highlightcolor=ACCENT)
 
     def _spinf(self, parent, key, lo, hi, step):
         return ttk.Spinbox(parent, textvariable=self._vars[key],
@@ -450,19 +403,6 @@ class App(tk.Tk):
     def _spini(self, parent, key, lo, hi):
         return ttk.Spinbox(parent, textvariable=self._vars[key],
                            from_=lo, to=hi, increment=1, width=10)
-
-    def _chk(self, parent, key):
-        return tk.Checkbutton(parent, variable=self._vars[key],
-                              bg=PANEL, fg=FG,
-                              activebackground=PANEL, activeforeground=FG,
-                              selectcolor=BORDER, relief=tk.FLAT, bd=0)
-
-    def _sbtn(self, parent, text, cmd):
-        return tk.Button(parent, text=text, command=cmd,
-                         bg=BORDER, fg=FG,
-                         activebackground=ACCENT, activeforeground=BTN_FG,
-                         relief=tk.FLAT, bd=0, padx=8, pady=2,
-                         font=("TkDefaultFont", 10), cursor="hand2")
 
     # -- Logic ----------------------------------------------------------------
 
@@ -564,9 +504,9 @@ class App(tk.Tk):
                                     str(self._vars["vtracer_filter_speckle"].get()),
             "--curve-segments",     str(self._vars["curve_segments"].get()),
         ]
-        if self._vars["invert"].get():       cmd.append("--invert")
-        if self._vars["stl_ascii"].get():    cmd.append("--stl-ascii")
-        if self._vars["verbose"].get():      cmd.append("--verbose")
+        if self._vars["invert"].get():    cmd.append("--invert")
+        if self._vars["stl_ascii"].get(): cmd.append("--stl-ascii")
+        if self._vars["verbose"].get():   cmd.append("--verbose")
         return cmd
 
     def _run(self):
@@ -579,7 +519,7 @@ class App(tk.Tk):
         self._clear_log()
         self._log_line(f"$ {' '.join(cmd)}\n", "DEBUG")
         self._output_path = self._vars["output"].get().strip()
-        self._run_btn.configure(text="Cancel", bg=ERR)
+        self._run_btn.configure(text="Cancel")
         threading.Thread(target=self._worker, args=(cmd,), daemon=True).start()
 
     def _worker(self, cmd):
@@ -603,7 +543,7 @@ class App(tk.Tk):
                     self._log_line(data)
                 elif kind == "done":
                     self._proc = None
-                    self._run_btn.configure(text="Run pyBlock", bg=ACCENT)
+                    self._run_btn.configure(text="Run pyBlock")
                     rc, exists = data, os.path.isfile(self._output_path)
                     if rc == 0 and exists:
                         self._log_line("\nFinished successfully.\n", "ok")
@@ -618,7 +558,7 @@ class App(tk.Tk):
                                 f"was created.\n\nSee the output log.")
                 elif kind == "error":
                     self._proc = None
-                    self._run_btn.configure(text="Run pyBlock", bg=ACCENT)
+                    self._run_btn.configure(text="Run pyBlock")
                     self._log_line(f"\nFailed to launch: {data}\n", "ERROR")
                     messagebox.showerror("Launch error", data)
         except queue.Empty:
