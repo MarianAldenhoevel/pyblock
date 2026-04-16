@@ -9,11 +9,9 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
-PYBLOCK_PY   = os.path.join(SCRIPT_DIR, "pyblock.py")
+SCRIPT_DIR    = os.path.dirname(os.path.abspath(__file__))
+PYBLOCK_PY    = os.path.join(SCRIPT_DIR, "pyblock.py")
 SETTINGS_FILE = os.path.join(SCRIPT_DIR, "pyblock-ui.json")
-
-# -- Defaults -----------------------------------------------------------------
 
 DEFAULTS: dict = {
     "input":  "",
@@ -38,7 +36,17 @@ DEFAULTS: dict = {
     "open_after_run":     False,
 }
 
-# -- Persistence --------------------------------------------------------------
+BG      = "#1e1e2e"
+PANEL   = "#2a2a3e"
+BORDER  = "#3d3d55"
+ACCENT  = "#7c6af7"
+ACCENT2 = "#5af78e"
+WARN    = "#f7c35a"
+ERR     = "#f75a7c"
+FG      = "#cdd6f4"
+FG_DIM  = "#7c7fa3"
+BTN_FG  = "#ffffff"
+LOG_BG  = "#13131f"
 
 def load_settings() -> dict:
     try:
@@ -55,24 +63,8 @@ def save_settings(s: dict) -> None:
     except OSError as e:
         print(f"Warning: could not save settings: {e}", file=sys.stderr)
 
-# -- Colours ------------------------------------------------------------------
-
-BG      = "#1e1e2e"
-PANEL   = "#2a2a3e"
-BORDER  = "#3d3d55"
-ACCENT  = "#7c6af7"
-ACCENT2 = "#5af78e"
-WARN    = "#f7c35a"
-ERR     = "#f75a7c"
-FG      = "#cdd6f4"
-FG_DIM  = "#7c7fa3"
-BTN_FG  = "#ffffff"
-LOG_BG  = "#13131f"
-
-# -- Scrollable frame ---------------------------------------------------------
 
 class ScrollFrame(tk.Frame):
-    """A frame whose content scrolls vertically.  Add widgets to self.inner."""
 
     def __init__(self, parent, **kw):
         super().__init__(parent, **kw)
@@ -114,8 +106,6 @@ class ScrollFrame(tk.Frame):
             self._c.yview_scroll(-1 if e.num == 4 else 1, "units")
 
 
-# -- Main window --------------------------------------------------------------
-
 class App(tk.Tk):
 
     def __init__(self):
@@ -141,8 +131,6 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(80, self._poll)
 
-    # -- Styles ---------------------------------------------------------------
-
     def _setup_styles(self):
         st = ttk.Style(self)
         st.theme_use("clam")
@@ -167,8 +155,6 @@ class App(tk.Tk):
                fieldbackground=[("readonly", LOG_BG)],
                foreground=[("readonly", FG)],
                selectbackground=[("readonly", ACCENT)])
-
-    # -- Variables ------------------------------------------------------------
 
     def _make_vars(self) -> dict:
         S = self.settings
@@ -210,28 +196,47 @@ class App(tk.Tk):
                 out[k] = DEFAULTS[k]
         return out
 
-    # -- Build layout ---------------------------------------------------------
-
     def _build(self):
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=2)   # settings gets more space
-        self.rowconfigure(2, weight=1)   # log
+        self.rowconfigure(1, weight=1)   # paned window expands
 
         # Accent strip at top
         tk.Frame(self, bg=ACCENT, height=4).grid(row=0, column=0, sticky="ew")
 
-        # Scrollable settings
-        self._scroll = ScrollFrame(self, bg=BG)
-        self._scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(10, 4))
+        # PanedWindow holds settings (top) and log (bottom) with a draggable sash
+        self._paned = tk.PanedWindow(
+            self, orient=tk.VERTICAL,
+            bg=BORDER,           # sash colour — visible contrast stripe
+            sashwidth=6,
+            sashrelief=tk.FLAT,
+            sashpad=0,
+            relief=tk.FLAT, bd=0,
+        )
+        self._paned.grid(row=1, column=0, sticky="nsew", padx=12, pady=(10, 4))
+
+        # Scrollable settings pane
+        self._scroll = ScrollFrame(self._paned, bg=BG)
         self._build_settings(self._scroll.inner)
+        self._paned.add(self._scroll, stretch="always", minsize=200)
 
-        # Log
-        self._build_log()
+        # Log pane (built inline so it lives inside the paned window)
+        self._log_frame = self._make_log_frame(self._paned)
+        self._paned.add(self._log_frame, stretch="always", minsize=80)
 
-        # Action bar
+        # Set initial 2:1 split after geometry is resolved
+        self.after(10, self._set_initial_sash)
+
+        # Action bar (outside paned window, always visible)
         self._build_bar()
 
-    # -- Settings -------------------------------------------------------------
+    def _set_initial_sash(self):
+        """Position sash at 2/3 of available height for a 2:1 settings:log ratio."""
+        total = self._paned.winfo_height()
+        if total > 1:
+            self._paned.sash_place(0, 0, int(total * 2 / 3))
+        else:
+            # Geometry not yet resolved; retry once more
+            self.after(50, self._set_initial_sash)
 
     def _build_settings(self, p):
         p.columnconfigure(0, weight=1)
@@ -251,7 +256,10 @@ class App(tk.Tk):
         box = tk.Frame(parent, bg=PANEL,
                        highlightthickness=1, highlightbackground=BORDER)
         box.grid(row=r+1, column=0, sticky="ew", pady=(0, 6))
-        box.columnconfigure(1, weight=1)
+        # col 0 = row label, col 1 = widget, col 2 = spacer (absorbs slack),
+        # col 3 = note.  Stretch widgets (file rows) span cols 1-2 instead.
+        box.columnconfigure(1, weight=0)
+        box.columnconfigure(2, weight=1)
         builder(box)
         return r + 2
 
@@ -259,14 +267,23 @@ class App(tk.Tk):
         tk.Label(box, text=label, bg=PANEL, fg=FG,
                  font=("TkDefaultFont", 10), anchor="w",
                  padx=10, pady=5).grid(row=r, column=0, sticky="w")
-        widget.grid(row=r, column=1, sticky="ew", padx=(4, 6), pady=3)
+        # File-entry frames stretch across cols 1+2 (the widget + spacer cols).
+        # Everything else (spinboxes, checkboxes, comboboxes) sits at natural
+        # width in col 1 only, leaving col 2 as the spacer that absorbs slack.
+        is_stretch = isinstance(widget, tk.Frame)
+        if is_stretch:
+            widget.grid(row=r, column=1, columnspan=2,
+                        sticky="ew", padx=(4, 6), pady=3)
+        else:
+            widget.grid(row=r, column=1,
+                        sticky="w", padx=(4, 6), pady=3)
         if note:
+            # Note always goes in col 3, right after the spacer col — so it
+            # sits close to the widget regardless of window width.
             tk.Label(box, text=note, bg=PANEL, fg=FG_DIM,
                      font=("TkDefaultFont", 9),
-                     anchor="w").grid(row=r, column=2, sticky="w",
+                     anchor="w").grid(row=r, column=3, sticky="w",
                                       padx=(2, 8))
-
-    # Section content ---------------------------------------------------------
 
     def _sec_io(self, box):
         f0 = tk.Frame(box, bg=PANEL)
@@ -311,7 +328,8 @@ class App(tk.Tk):
         self._row(box, 0, "Engine", cb)
 
         self._potrace_box = tk.Frame(box, bg=PANEL)
-        self._potrace_box.columnconfigure(1, weight=1)
+        self._potrace_box.columnconfigure(1, weight=0)
+        self._potrace_box.columnconfigure(2, weight=1)
         self._row(self._potrace_box, 0, "  Blacklevel",
             self._spinf(self._potrace_box, "potrace_threshold", 0, 1, 0.05),
             "0.0 - 1.0")
@@ -326,7 +344,8 @@ class App(tk.Tk):
         self._potrace_box.grid(row=1, column=0, columnspan=3, sticky="ew")
 
         self._vtracer_box = tk.Frame(box, bg=PANEL)
-        self._vtracer_box.columnconfigure(1, weight=1)
+        self._vtracer_box.columnconfigure(1, weight=0)
+        self._vtracer_box.columnconfigure(2, weight=1)
         self._row(self._vtracer_box, 0, "  Color precision",
             self._spini(self._vtracer_box, "vtracer_color_precision", 1, 8),
             "bits")
@@ -346,9 +365,9 @@ class App(tk.Tk):
 
     # -- Log ------------------------------------------------------------------
 
-    def _build_log(self):
-        outer = tk.Frame(self, bg=BG)
-        outer.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 4))
+    def _make_log_frame(self, parent) -> tk.Frame:
+        """Build the log output pane and return it (for use inside PanedWindow)."""
+        outer = tk.Frame(parent, bg=BG)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
 
@@ -377,12 +396,14 @@ class App(tk.Tk):
                          ("ERROR", ERR), ("FATAL", ERR), ("ok", ACCENT2)]:
             self._log.tag_configure(tag, foreground=col)
 
+        return outer
+
     # -- Action bar -----------------------------------------------------------
 
     def _build_bar(self):
         bar = tk.Frame(self, bg=PANEL,
                        highlightthickness=1, highlightbackground=BORDER)
-        bar.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 10))
+        bar.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
         bar.columnconfigure(2, weight=1)
 
         for col, key, text in [(0, "overwrite",     "Overwrite output"),
